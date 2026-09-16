@@ -6,14 +6,32 @@ account (paid tier = commercial rights + WAV downloads).
 
 ## Getting your music off Suno now that downloads are quota-limited
 
-If your download quota is too small to get your whole library out, there's a
-second path: **Capture** (`python main.py capture`, or the "Capture from
-Suno" button in the GUI). It opens a real browser, plays through your entire
-library track by track, and records the audio your speakers are actually
-outputting — the same idea as recording what comes out of a speaker, just
-done digitally. It never touches Suno's stream or its encryption; it only
-captures the legitimate audio your own browser has already been allowed to
-decrypt and play, so it doesn't involve circumventing anything.
+Two capture paths exist, solving the same problem differently:
+
+- **`chrome_extension/`** — a Chrome extension using tab audio capture.
+  Runs inside your real browser session (no Google sign-in blocking, no
+  separate login step), doesn't need to play out loud, and saves one clean
+  file per track directly. See `chrome_extension/README.md`. **This is the
+  recommended path** — fewer moving parts, fewer things that can go wrong.
+- **`python main.py capture`** (below) — browser automation + system audio
+  loopback recording. Built first, still works, needs a one-time manual
+  login workaround and Windows-specific audio capture, but useful if you'd
+  rather not install a browser extension.
+
+Both record each track as its own file directly the moment it plays — no
+splitting a long recording apart afterward, and both re-read the track's
+title from its own page (not just the library list, which can go stale if a
+track was renamed) so the saved filename matches what's actually shown.
+Either way, captured files land in a folder the rest of this app already
+knows how to pick up and organize (the same folder-watching logic as a
+manual download).
+
+It opens a real browser, plays through your entire library track by track,
+and records the audio your speakers are actually outputting — the same idea
+as recording what comes out of a speaker, just done digitally. It never
+touches Suno's stream or its encryption; it only captures the legitimate
+audio your own browser has already been allowed to decrypt and play, so it
+doesn't involve circumventing anything.
 
 **What this means in practice:**
 - It takes as long as your library's total playtime — there's no way to
@@ -25,6 +43,9 @@ decrypt and play, so it doesn't involve circumventing anything.
   your best/most important tracks first, and capture for the rest
 - It resumes correctly — tracks already in `output/` get skipped on a re-run,
   so you can stop and restart across multiple sessions
+- Each track is recorded as its own file the moment it plays — if capture
+  gets interrupted partway through, everything captured before that point is
+  already saved as complete, individual files, nothing to lose
 
 **Before your first capture — log in once, by hand:**
 
@@ -54,21 +75,26 @@ ambiguous which one you're looking at.
 
 **Two things that genuinely need your machine to prove out**, flagged
 honestly rather than pretended to work:
-1. The page selectors in `capture/browser_player.py` (which button is
-   "play," which element holds the title) are my best guess at Suno's DOM,
-   not verified against the live site. They'll likely need a small fix —
-   open DevTools on suno.com/me, inspect a track row, and update the three
-   selectors marked at the top of that file. Everything else should work
-   once those are right.
+1. The row-button aria-label pattern in `capture/browser_player.py`
+   (`Play "Track Name"`) — verified against real page HTML pulled from the
+   live site, not guessed, but Suno's DOM could still differ in ways that
+   haven't come up yet or change over time.
 2. The loopback recorder (`capture/loopback_recorder.py`) needs real audio
    hardware to test, which this dev environment doesn't have. Try a short
    capture first (stop after 1-2 tracks) to confirm it's recording your
    system audio correctly before running a full library pass.
 
-The track-splitting logic (finding where one track ends and the next begins
-in the recording) **is** fully tested — verified against synthetic audio
-with known boundaries, including a quiet passage *inside* a track that
-correctly doesn't get mistaken for a gap between tracks.
+Capture stays on `suno.com/me` for the entire session — it never navigates
+to an individual track's own page, which earlier versions did and which
+caused two real problems: that page has a "Similar" recommendations sidebar
+showing *other people's* tracks, and full-page navigation between tracks
+didn't reliably preserve the browser's audio capture state. Staying on one
+page and clicking each row's own inline Play button avoids both.
+
+The per-track recording boundary logic (making sure each track's audio stays
+cleanly separated, with no bleed from the track before or after it) **is**
+fully tested — verified with simulated audio data against the actual
+begin/end-track state machine.
 
 ## How Suno downloads work (updated — Cloudflare blocks direct API scripting)
 
