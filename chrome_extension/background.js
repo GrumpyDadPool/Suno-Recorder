@@ -6,18 +6,15 @@
 //
 // tabCapture's actual media stream can only be consumed in a context with a
 // DOM (a service worker can't call getUserMedia) — that's what the offscreen
-// document (offscreen.html/offscreen.js) is for. This file's job is just:
-// get a stream id for the target tab, hand it to the offscreen document, and
-// relay start/stop recording commands to it.
+// document (offscreen.html/offscreen.js) is for.
 //
 // IMPORTANT — every message includes a `target` field ("background" or
-// "offscreen"), and every listener bails out immediately (returns false,
-// doesn't call sendResponse) for messages not addressed to it.
+// "offscreen"), and every listener bails out immediately for messages not
+// addressed to it.
 //
-// IMPORTANT — the capture stream is acquired ONCE, right when "Start
-// recording" is clicked, not per track. chrome.tabCapture.getMediaStreamId()
-// requires a fresh user gesture; acquiring later (after library scroll)
-// fails with the activeTab permission error.
+// IMPORTANT — the capture stream is acquired ONCE when "Start recording" is
+// clicked (fresh user gesture). Do not recreate an empty offscreen document
+// mid-session without re-initing the stream.
 
 const OFFSCREEN_URL = "offscreen.html";
 const KEEPALIVE_ALARM = "suno-recorder-keepalive";
@@ -46,7 +43,6 @@ async function ensureOffscreenDocument() {
 }
 
 async function startKeepalive() {
-  // Chrome may clamp sub-minute periods; 1 minute is enough to keep the worker warm.
   await chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 });
 }
 
@@ -56,7 +52,6 @@ async function stopKeepalive() {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
-    // Touch storage so the worker stays responsive during long sessions.
     chrome.storage.local.set({ sunoCaptureHeartbeat: Date.now() });
   }
 });
@@ -80,62 +75,94 @@ async function handleMessage(message, sender) {
       await closeOffscreenDocumentIfExists();
       const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
       await ensureOffscreenDocument();
+      // Brief pause so the offscreen listener is attached before initStream.
+      await delay(75);
       const options = await getOptions();
-      await chrome.runtime.sendMessage({
+      const init = await chrome.runtime.sendMessage({
         target: "offscreen",
         type: "initStream",
         streamId,
         monitorAudio: Boolean(options.monitorAudio),
       });
+      if (!init || !init.ok) {
+        throw new Error(init && init.error ? init.error : "Failed to initialize tab audio capture");
+      }
       await startKeepalive();
       return { ok: true };
     }
 
     case "startRecording": {
-      await ensureOffscreenDocument();
-      await chrome.runtime.sendMessage({
+      if (!(await offscreenDocumentExists())) {
+        throw new Error(
+          "Capture stream was lost (offscreen page closed). Click Stop, then Start recording again."
+        );
+      }
+      const probe = await chrome.runtime.sendMessage({ target: "offscreen", type: "hasStream" });
+      if (!probe || !probe.hasStream) {
+        throw new Error(
+          "Capture stream was lost. Click Stop, then Start recording again from the Suno tab."
+        );
+      }
+      const response = await chrome.runtime.sendMessage({
         target: "offscreen",
         type: "startRecording",
         title: message.title,
       });
+      if (!response || !response.ok) {
+        throw new Error(response && response.error ? response.error : "startRecording failed");
+      }
       return { ok: true };
     }
 
     case "stopRecordingAndSave": {
-      await chrome.runtime.sendMessage({
+      const response = await chrome.runtime.sendMessage({
         target: "offscreen",
         type: "stopRecordingAndSave",
         filename: message.filename,
       });
+      if (!response || !response.ok) {
+        throw new Error(response && response.error ? response.error : "save failed");
+      }
       return { ok: true };
     }
 
     case "discardRecording": {
-      await chrome.runtime.sendMessage({ target: "offscreen", type: "discardRecording" });
+      if (await offscreenDocumentExists()) {
+        await chrome.runtime.sendMessage({ target: "offscreen", type: "discardRecording" });
+      }
       return { ok: true };
     }
 
     case "saveRecording": {
-      // Prefer binary payload from offscreen (avoids data-URL size limits on long tracks).
-      let url = message.dataUrl;
+      let url = message.dataUrl || null;
       let objectUrl = null;
-      if (message.buffer) {
-        const blob = new Blob([message.buffer], { type: message.mimeType || "audio/webm" });
+
+      if (!url && message.buffer) {
+        const bytes = coerceToUint8Array(message.buffer);
+        if (!bytes || !bytes.byteLength) {
+          throw new Error("saveRecording received an empty audio buffer");
+        }
+        const blob = new Blob([bytes], { type: message.mimeType || "audio/webm" });
         objectUrl = URL.createObjectURL(blob);
         url = objectUrl;
       }
+
       if (!url) {
         throw new Error("saveRecording had no audio payload");
       }
+
       try {
-        await chrome.downloads.download({
+        const downloadId = await chrome.downloads.download({
           url,
           filename: `${message.filename}.webm`,
           saveAs: false,
+          conflictAction: "uniquify",
         });
+        if (downloadId === undefined) {
+          throw new Error("chrome.downloads.download returned no id");
+        }
       } finally {
         if (objectUrl) {
-          // Give Chrome a moment to latch the download before revoking.
           setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
         }
       }
@@ -164,6 +191,28 @@ async function handleMessage(message, sender) {
       return { ok: false, error: `Unknown message type: ${message.type}` };
     }
   }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function coerceToUint8Array(buffer) {
+  if (!buffer) return null;
+  if (buffer instanceof ArrayBuffer) return new Uint8Array(buffer);
+  if (ArrayBuffer.isView(buffer)) {
+    return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  }
+  if (typeof buffer === "object") {
+    // Rare structured-clone oddity: plain object with numeric keys.
+    const keys = Object.keys(buffer);
+    if (keys.length && keys.every((k) => /^\d+$/.test(k))) {
+      const arr = new Uint8Array(keys.length);
+      for (const k of keys) arr[Number(k)] = buffer[k] & 0xff;
+      return arr;
+    }
+  }
+  return null;
 }
 
 async function getOptions() {

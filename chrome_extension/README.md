@@ -65,6 +65,10 @@ See `../capture/DEPRECATED.md`.
 
 ## Changelog highlights
 
+- **1.1.1** — Fix virtualized library scan (accumulate titles while scrolling,
+  not DOM button count); find rows again when remounted; wait for real playback
+  via media element *or* playbar; surface recorder/save errors instead of
+  silently discarding every track; harden offscreen stream + download path
 - **1.1.0** — Rebrand to Suno Recorder, polished popup/options, session lock,
   playback-start detection, unique-title scan, ArrayBuffer downloads (long tracks),
   keepalive alarm, optional speaker monitor, max-track smoke-test setting
