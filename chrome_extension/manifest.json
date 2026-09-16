@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Suno Recorder",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Record your Suno library track-by-track with Chrome tab audio — no download quota, silent capture inside your real browser session.",
   "permissions": ["tabCapture", "activeTab", "downloads", "storage", "offscreen", "alarms", "tabs", "scripting"],
   "host_permissions": ["https://suno.com/*"],

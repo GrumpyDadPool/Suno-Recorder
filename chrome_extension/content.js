@@ -6,20 +6,37 @@
 // stop at ~24 tracks and then only "see" whatever was still mounted.
 // Discovery therefore accumulates unique titles while scrolling.
 //
-// Row aria-label pattern: `Play "Track Name"`.
+// Row aria-label pattern: `Play "Track Name"` / `Pause "Track Name"`.
+
+function runtimeAlive() {
+  try {
+    return Boolean(chrome.runtime && chrome.runtime.id);
+  } catch (_) {
+    return false;
+  }
+}
+
+function isContextInvalidatedError(err) {
+  const msg = String(err && err.message ? err.message : err);
+  return /extension context invalidated/i.test(msg);
+}
+
+const RELOAD_HINT =
+  "Extension was reloaded while this tab was open. Refresh suno.com/me, then click Start recording again.";
+
+// Each inject bumps the generation so stale content scripts (from before Reload)
+// ignore new storage events instead of crashing with "Extension context invalidated".
+const SCRIPT_GENERATION = (globalThis.__sunoRecorderGeneration =
+  (globalThis.__sunoRecorderGeneration || 0) + 1);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!runtimeAlive()) return false;
   if (message && message.target === "content" && message.type === "ping") {
-    sendResponse({ ok: true, path: location.pathname });
+    sendResponse({ ok: true, path: location.pathname, generation: SCRIPT_GENERATION });
     return false;
   }
   return false;
 });
-
-if (globalThis.__sunoRecorderContentLoaded) {
-  // Extension reload can reinject; don't wire a second capture loop.
-} else {
-  globalThis.__sunoRecorderContentLoaded = true;
 
 const ROW_LABEL_REGEX = /^(Play|Pause) "(.*)"$/s;
 const MAX_SCROLL_ATTEMPTS = 200;
@@ -31,25 +48,51 @@ let sessionRunning = false;
 // titleKey -> approx discovery scroll index (helps remount jumps)
 const titleScrollIndex = new Map();
 
+function assertAlive() {
+  if (!runtimeAlive()) {
+    throw new Error(RELOAD_HINT);
+  }
+}
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function getState() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get("sunoCaptureState", (result) => {
-      resolve(result.sunoCaptureState || { status: "idle" });
-    });
+  return new Promise((resolve, reject) => {
+    try {
+      assertAlive();
+      chrome.storage.local.get("sunoCaptureState", (result) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(result.sunoCaptureState || { status: "idle" });
+      });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 function setState(state) {
-  return new Promise((resolve) => {
-    chrome.storage.local.set({ sunoCaptureState: state }, resolve);
+  return new Promise((resolve, reject) => {
+    try {
+      assertAlive();
+      chrome.storage.local.set({ sunoCaptureState: state }, () => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve();
+      });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 async function getOptions() {
+  assertAlive();
   const response = await chrome.runtime.sendMessage({ target: "background", type: "getOptions" });
   if (response && response.ok && response.options) return response.options;
   return { maxTracks: 0, filenamePrefix: "", skipCaptured: true, monitorAudio: false };
@@ -191,11 +234,13 @@ async function discoverAllTitles(log) {
   let lastSize = discovered.size;
 
   for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
+    assertAlive();
     scrollLibraryDown();
 
     // Poll for newly mounted virtualized rows (count may stay flat while titles change).
     const pollStart = Date.now();
     while (Date.now() - pollStart < 3500) {
+      assertAlive();
       harvestVisibleTitles(discovered, i + 1);
       if (discovered.size > lastSize) break;
       await sleep(250);
@@ -375,11 +420,21 @@ async function playRowAndWait(title, log) {
     return false;
   }
 
-  button.click();
+  const label = parseRowLabel(button.getAttribute("aria-label") || "");
+  if (label && label.action === "Pause") {
+    // Already the active row — restart from the beginning.
+    button.click();
+    await sleep(400);
+    const playBtn = findVisibleButtonByTitle(title) || button;
+    playBtn.click();
+  } else {
+    button.click();
+  }
   await sleep(150);
   // Some rows need a second click if the first only selects the row.
   if (!findPlayingMedia() && !isPlaybarPlaying()) {
-    button.click();
+    const again = findVisibleButtonByTitle(title) || button;
+    again.click();
   }
 
   const started = await waitForPlaybackStart(PLAYBACK_START_TIMEOUT_MS, log);
@@ -500,12 +555,33 @@ async function runCaptureSession(log) {
 
 function log(message) {
   console.log("Suno Recorder:", message);
-  chrome.storage.local.set({ sunoCaptureLastLog: message });
+  try {
+    if (!runtimeAlive()) return;
+    chrome.storage.local.set({ sunoCaptureLastLog: message });
+  } catch (_) {
+    /* extension reloaded — ignore */
+  }
 }
 
 async function start() {
+  if (SCRIPT_GENERATION !== globalThis.__sunoRecorderGeneration) return;
   if (sessionRunning) return;
-  const state = await getState();
+  if (!runtimeAlive()) {
+    console.warn("Suno Recorder:", RELOAD_HINT);
+    return;
+  }
+
+  let state;
+  try {
+    state = await getState();
+  } catch (err) {
+    if (isContextInvalidatedError(err) || !runtimeAlive()) {
+      console.warn("Suno Recorder:", RELOAD_HINT);
+      return;
+    }
+    throw err;
+  }
+
   // Only begin on explicit "collecting" — ignore "starting" (stream still wiring up).
   if (!state || state.status !== "collecting") return;
   if (!location.pathname.startsWith("/me")) {
@@ -516,6 +592,21 @@ async function start() {
   sessionRunning = true;
   try {
     await runCaptureSession(log);
+  } catch (err) {
+    if (isContextInvalidatedError(err) || !runtimeAlive()) {
+      console.warn("Suno Recorder:", RELOAD_HINT);
+      return;
+    }
+    log(`Capture crashed: ${err && err.message ? err.message : err}`);
+    try {
+      await setState({ status: "idle", failedAt: Date.now() });
+      await chrome.storage.local.set({
+        sunoCaptureError: err && err.message ? err.message : String(err),
+      });
+      await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+    } catch (_) {
+      /* ignore cleanup failures after crash */
+    }
   } finally {
     sessionRunning = false;
   }
@@ -524,6 +615,8 @@ async function start() {
 start();
 
 chrome.storage.onChanged.addListener((changes, area) => {
+  if (SCRIPT_GENERATION !== globalThis.__sunoRecorderGeneration) return;
+  if (!runtimeAlive()) return;
   if (area === "local" && changes.sunoCaptureState) {
     const newState = changes.sunoCaptureState.newValue;
     if (newState && newState.status === "collecting") {
@@ -531,5 +624,3 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
   }
 });
-
-} // end __sunoRecorderContentLoaded guard
