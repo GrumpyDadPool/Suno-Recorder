@@ -63,6 +63,9 @@ See `../capture/DEPRECATED.md`.
 
 ## Changelog highlights
 
+- **1.1.3** — Fix "Start recording does nothing": show errors/timeouts, reset
+  stuck sessions, retry offscreen audio init, reinject content script if the
+  Suno tab wasn't refreshed after Reload
 - **1.1.2** — Save as WAV by default (decode MediaRecorder WebM/Opus → PCM WAV)
   so Downloads and the Distributor watcher get a normal audio file
 - **1.1.1** — Fix virtualized library scan (accumulate titles while scrolling,
