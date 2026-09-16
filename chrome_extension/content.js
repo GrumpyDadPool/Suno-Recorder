@@ -304,7 +304,8 @@ async function playRowAndWait(title, log) {
     log(`  ! save failed: ${stopResponse && stopResponse.error ? stopResponse.error : "unknown"}`);
     return false;
   }
-  log(`  saved ${filename}.webm`);
+  const savedAs = (stopResponse && stopResponse.extension) || "wav";
+  log(`  saved ${filename}.${savedAs}`);
   return true;
 }
 

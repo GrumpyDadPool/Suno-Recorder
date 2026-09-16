@@ -20,7 +20,7 @@ Spotify-prep packages).
 2. Open `https://suno.com/me`
 3. Click the extension icon → **Start recording**
 4. It scrolls to load your library, plays each row's inline Play button, and
-   saves one `.webm` per track to Chrome's download folder
+   saves one `.wav` per track to Chrome's download folder
 5. Reopen the popup anytime for progress (capture keeps running if the popup closes)
 
 **Options** (right-click the icon → Options, or the link in the popup):
@@ -34,12 +34,10 @@ Point Chrome's download location (`chrome://settings/downloads`) at the folder
 the Distributor watcher watches, then run `python main.py watch` / the GUI to
 organize files into `output/`.
 
-Convert WebM → WAV when you need masters for distribution:
-
-```bash
-ffmpeg -i "Track Name.webm" "Track Name.wav"
-```
-
+Chrome's `MediaRecorder` can only capture as WebM/Opus; the extension decodes
+that and writes **WAV** so files work with players and with
+`suno_watcher.py` (which only picks up `.wav` / `.mp3`). If WAV conversion
+fails for a track, it falls back to `.webm` and shows an error in the popup.
 ## How it works
 
 Stays on `suno.com/me` for the whole session (never opens individual track
@@ -65,6 +63,8 @@ See `../capture/DEPRECATED.md`.
 
 ## Changelog highlights
 
+- **1.1.2** — Save as WAV by default (decode MediaRecorder WebM/Opus → PCM WAV)
+  so Downloads and the Distributor watcher get a normal audio file
 - **1.1.1** — Fix virtualized library scan (accumulate titles while scrolling,
   not DOM button count); find rows again when remounted; wait for real playback
   via media element *or* playbar; surface recorder/save errors instead of
