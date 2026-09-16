@@ -123,7 +123,7 @@ async function handleMessage(message, sender) {
       if (!response || !response.ok) {
         throw new Error(response && response.error ? response.error : "save failed");
       }
-      return { ok: true };
+      return { ok: true, extension: response.extension || "wav" };
     }
 
     case "discardRecording": {
@@ -142,7 +142,7 @@ async function handleMessage(message, sender) {
         if (!bytes || !bytes.byteLength) {
           throw new Error("saveRecording received an empty audio buffer");
         }
-        const blob = new Blob([bytes], { type: message.mimeType || "audio/webm" });
+        const blob = new Blob([bytes], { type: message.mimeType || "audio/wav" });
         objectUrl = URL.createObjectURL(blob);
         url = objectUrl;
       }
@@ -151,10 +151,11 @@ async function handleMessage(message, sender) {
         throw new Error("saveRecording had no audio payload");
       }
 
+      const extension = (message.extension || "wav").replace(/^\./, "");
       try {
         const downloadId = await chrome.downloads.download({
           url,
-          filename: `${message.filename}.webm`,
+          filename: `${message.filename}.${extension}`,
           saveAs: false,
           conflictAction: "uniquify",
         });
@@ -166,7 +167,7 @@ async function handleMessage(message, sender) {
           setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
         }
       }
-      return { ok: true };
+      return { ok: true, extension };
     }
 
     case "reportError": {

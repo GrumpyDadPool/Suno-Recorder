@@ -32,9 +32,10 @@ async function handleMessage(message) {
     case "startRecording":
       startRecording(message.title);
       return { ok: true };
-    case "stopRecordingAndSave":
-      await stopRecordingAndSave(message.filename);
-      return { ok: true };
+    case "stopRecordingAndSave": {
+      const saved = await stopRecordingAndSave(message.filename);
+      return { ok: true, extension: (saved && saved.extension) || "wav" };
+    }
     case "discardRecording":
       discardRecording();
       return { ok: true };
@@ -153,6 +154,93 @@ function blobToDataUrl(blob) {
   });
 }
 
+// MediaRecorder can only emit WebM/Opus (or similar) in Chrome — not WAV/MP3.
+// Decode that blob and rewrite as 16-bit PCM WAV so Downloads + the Distributor
+// watcher (which only picks up .wav/.mp3) get a normal audio file.
+async function convertRecordingToWav(webmBlob) {
+  const audioCtx = new AudioContext();
+  try {
+    const encoded = await webmBlob.arrayBuffer();
+    const audioBuffer = await audioCtx.decodeAudioData(encoded.slice(0));
+    return audioBufferToWavBlob(audioBuffer);
+  } finally {
+    try {
+      await audioCtx.close();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+}
+
+function audioBufferToWavBlob(audioBuffer) {
+  const numChannels = audioBuffer.numberOfChannels;
+  const sampleRate = audioBuffer.sampleRate;
+  const bitDepth = 16;
+  const samples = audioBuffer.length;
+  const blockAlign = (numChannels * bitDepth) >> 3;
+  const dataSize = samples * blockAlign;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  const writeString = (offset, string) => {
+    for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
+  };
+
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitDepth, true);
+  writeString(36, "data");
+  view.setUint32(40, dataSize, true);
+
+  const channels = [];
+  for (let ch = 0; ch < numChannels; ch++) channels.push(audioBuffer.getChannelData(ch));
+
+  let offset = 44;
+  for (let i = 0; i < samples; i++) {
+    for (let ch = 0; ch < numChannels; ch++) {
+      const sample = Math.max(-1, Math.min(1, channels[ch][i]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += 2;
+    }
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+async function sendSavePayload(filename, blob, mimeType, extension) {
+  try {
+    const buffer = await blob.arrayBuffer();
+    const response = await chrome.runtime.sendMessage({
+      target: "background",
+      type: "saveRecording",
+      filename,
+      mimeType,
+      extension,
+      buffer,
+    });
+    if (response && response.ok) return response;
+    throw new Error(response && response.error ? response.error : "buffer save failed");
+  } catch (bufferErr) {
+    const dataUrl = await blobToDataUrl(blob);
+    return chrome.runtime.sendMessage({
+      target: "background",
+      type: "saveRecording",
+      filename,
+      mimeType,
+      extension,
+      dataUrl,
+    });
+  }
+}
+
 function stopRecordingAndSave(filename) {
   return new Promise((resolve, reject) => {
     if (!currentRecorder) {
@@ -162,55 +250,30 @@ function stopRecordingAndSave(filename) {
     const recorder = currentRecorder;
     recorder.onstop = async () => {
       try {
-        // Make sure we flush the final chunk.
-        if (recorder.state === "inactive" && currentChunks.length === 0) {
-          // no-op
-        }
-        const mimeType = recorder.mimeType || "audio/webm";
-        const blob = new Blob(currentChunks, { type: mimeType });
-        if (!blob.size) {
+        const recordedMime = recorder.mimeType || "audio/webm";
+        const recordedBlob = new Blob(currentChunks, { type: recordedMime });
+        if (!recordedBlob.size) {
           throw new Error(
             `Recording for "${filename}" was empty (0 bytes). ` +
               "Usually means playback never reached the tab-capture stream — try Options → enable speaker monitor once to verify audio."
           );
         }
 
-        let response;
+        let saveBlob = recordedBlob;
+        let mimeType = recordedMime;
+        let extension = "webm";
         try {
-          const buffer = await blob.arrayBuffer();
-          response = await chrome.runtime.sendMessage({
-            target: "background",
-            type: "saveRecording",
-            filename,
-            mimeType,
-            buffer,
-          });
-        } catch (bufferErr) {
-          // Fallback for environments that choke on large ArrayBuffer messages.
-          const dataUrl = await blobToDataUrl(blob);
-          response = await chrome.runtime.sendMessage({
-            target: "background",
-            type: "saveRecording",
-            filename,
-            mimeType,
-            dataUrl,
-          });
+          saveBlob = await convertRecordingToWav(recordedBlob);
+          mimeType = "audio/wav";
+          extension = "wav";
+        } catch (convertErr) {
+          console.warn("Suno Recorder: WAV convert failed, falling back to WebM:", convertErr);
+          reportError(
+            `Couldn't convert "${filename}" to WAV (${convertErr && convertErr.message ? convertErr.message : convertErr}); saved WebM instead.`
+          );
         }
 
-        if (!response || !response.ok) {
-          // One more attempt via data URL if buffer path reported failure.
-          if (!response || /buffer|clone|message/i.test(String(response && response.error))) {
-            const dataUrl = await blobToDataUrl(blob);
-            response = await chrome.runtime.sendMessage({
-              target: "background",
-              type: "saveRecording",
-              filename,
-              mimeType,
-              dataUrl,
-            });
-          }
-        }
-
+        const response = await sendSavePayload(filename, saveBlob, mimeType, extension);
         if (!response || !response.ok) {
           throw new Error(
             response && response.error ? response.error : "background failed to save the recording"
@@ -218,7 +281,7 @@ function stopRecordingAndSave(filename) {
         }
         currentRecorder = null;
         currentChunks = [];
-        resolve();
+        resolve({ ok: true, extension });
       } catch (err) {
         reject(err);
       }
