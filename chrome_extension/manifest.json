@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "Suno Capture",
-  "version": "1.0.0",
-  "description": "Plays through your Suno library and saves each track as a clean audio file, using Chrome's tab audio capture — no download quota involved.",
-  "permissions": ["tabCapture", "activeTab", "downloads", "storage", "offscreen"],
+  "name": "Suno Recorder",
+  "version": "1.1.0",
+  "description": "Record your Suno library track-by-track with Chrome tab audio — no download quota, silent capture inside your real browser session.",
+  "permissions": ["tabCapture", "activeTab", "downloads", "storage", "offscreen", "alarms"],
   "host_permissions": ["https://suno.com/*"],
   "background": {
     "service_worker": "background.js"
@@ -17,6 +17,21 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Suno Capture"
+    "default_title": "Suno Recorder",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
   }
 }

@@ -41,7 +41,11 @@ class SunoDistributorGUI(tk.Tk):
         self.watch_status = ttk.Label(top, text="Not watching")
         self.watch_status.pack(side="left", padx=10)
 
-        self.capture_button = ttk.Button(top, text="Capture from Suno (play-through)", command=self.start_capture)
+        self.capture_button = ttk.Button(
+            top,
+            text="Legacy capture (deprecated)",
+            command=self.start_capture,
+        )
         self.capture_button.pack(side="left", padx=(10, 0))
 
         ttk.Button(top, text="Settings", command=self.open_settings).pack(side="right")
@@ -185,12 +189,11 @@ class SunoDistributorGUI(tk.Tk):
             return
 
         if not messagebox.askyesno(
-            "Start capture?",
-            "This opens a real browser and plays through your whole Suno library while "
-            "recording your system audio. It takes as long as your library's total "
-            "playtime — there's no way to speed this up. Your speakers will play audio "
-            "out loud during this (loopback recording captures what's already playing, "
-            "it doesn't work silently). Continue?",
+            "Legacy capture (deprecated)",
+            "Prefer Suno Recorder: load chrome_extension/ in Chrome "
+            "(silent tab capture, your normal login).\n\n"
+            "Continue with the old Playwright + loopback path anyway?\n"
+            "Speakers will play audio out loud during recording.",
         ):
             return
 
@@ -201,7 +204,7 @@ class SunoDistributorGUI(tk.Tk):
                 core.capture_suno_library(self.cfg, stop_event=self.capture_stop_event, log=self.log)
             except Exception as e:
                 self.log(f"Capture stopped with error: {e}")
-            self.capture_button.config(text="Capture from Suno (play-through)")
+            self.capture_button.config(text="Legacy capture (deprecated)")
             self.refresh_tracks()
 
         self.capture_thread = threading.Thread(target=worker, daemon=True)

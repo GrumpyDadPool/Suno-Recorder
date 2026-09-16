@@ -3,62 +3,110 @@ const logEl = document.getElementById("log");
 const errorEl = document.getElementById("error");
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
+const meterEl = document.getElementById("meter");
+const progressWrap = document.getElementById("progressWrap");
+const progressBar = document.getElementById("progressBar");
+const optionsLink = document.getElementById("optionsLink");
+
+function setBusy(isBusy) {
+  startBtn.disabled = isBusy;
+  meterEl.classList.toggle("active", isBusy);
+}
 
 function render(state, error, lastLog) {
+  const busy = state && (state.status === "collecting" || state.status === "capturing");
+  setBusy(Boolean(busy));
+
   if (!state || state.status === "idle") {
     const finished = state && state.finishedAt;
     if (finished && state.queue) {
       const done = state.queue.filter((t) => t.done && !t.failed).length;
       const failed = state.queue.filter((t) => t.failed).length;
-      statusEl.textContent = `Done. ${done} captured${failed ? `, ${failed} failed` : ""} out of ${state.queue.length}.`;
+      statusEl.textContent = `Done · ${done} saved${failed ? `, ${failed} failed` : ""} / ${state.queue.length}`;
+      progressWrap.hidden = false;
+      progressBar.style.width = "100%";
     } else {
-      statusEl.textContent = "Idle.";
+      statusEl.textContent = "Ready";
+      progressWrap.hidden = true;
+      progressBar.style.width = "0%";
     }
   } else if (state.status === "collecting") {
-    statusEl.textContent = "Scanning your library (scrolling to load everything)...";
+    statusEl.textContent = "Scanning library…";
+    progressWrap.hidden = false;
+    progressBar.style.width = "8%";
   } else if (state.status === "capturing") {
+    const total = state.queue.length || state.discoveredTotal || 0;
     const done = state.queue.filter((t) => t.done).length;
-    const current = state.queue[state.currentIndex];
-    statusEl.textContent = `Capturing ${done + 1} of ${state.queue.length}: ${current ? current.title : "..."}`;
+    const current = state.queue[state.currentIndex] || state.currentTitle;
+    const label = typeof current === "string" ? current : current && current.title;
+    statusEl.textContent = total
+      ? `Recording ${Math.min(done + 1, total)} / ${total}${label ? ` · ${label}` : ""}`
+      : `Recording${label ? ` · ${label}` : ""}`;
+    progressWrap.hidden = false;
+    const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 12;
+    progressBar.style.width = `${Math.max(pct, 10)}%`;
+  } else {
+    statusEl.textContent = String(state.status);
   }
 
   logEl.textContent = lastLog || "";
-  errorEl.textContent = error ? `! ${error}` : "";
+  errorEl.textContent = error ? error : "";
 }
 
 async function refresh() {
-  const result = await chrome.storage.local.get(["sunoCaptureState", "sunoCaptureError", "sunoCaptureLastLog"]);
+  const result = await chrome.storage.local.get([
+    "sunoCaptureState",
+    "sunoCaptureError",
+    "sunoCaptureLastLog",
+  ]);
   render(result.sunoCaptureState, result.sunoCaptureError, result.sunoCaptureLastLog);
 }
 
 startBtn.addEventListener("click", async () => {
+  errorEl.textContent = "";
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.url || !tab.url.includes("suno.com")) {
-    errorEl.textContent = "! Open suno.com/me in this tab first.";
+    errorEl.textContent = "Open suno.com/me in this tab first.";
     return;
   }
 
   await chrome.storage.local.remove(["sunoCaptureError", "sunoCaptureLastLog"]);
-  const response = await chrome.runtime.sendMessage({ target: "background", type: "startSession", tabId: tab.id });
+  const response = await chrome.runtime.sendMessage({
+    target: "background",
+    type: "startSession",
+    tabId: tab.id,
+  });
   if (!response || !response.ok) {
-    errorEl.textContent = `! Couldn't start capture: ${response ? response.error : "unknown error"}`;
+    errorEl.textContent = `Couldn't start: ${response && response.error ? response.error : "unknown error"}`;
     return;
   }
 
   await chrome.storage.local.set({
-    sunoCaptureState: { status: "collecting", queue: [], currentIndex: 0 },
+    sunoCaptureState: {
+      status: "collecting",
+      queue: [],
+      currentIndex: 0,
+      startedAt: Date.now(),
+    },
   });
 
-  // if the tab isn't already on /me, send it there so the content script's
-  // storage-change listener has a page to scrape
   if (!tab.url.includes("/me")) {
     await chrome.tabs.update(tab.id, { url: "https://suno.com/me" });
   }
 });
 
 stopBtn.addEventListener("click", async () => {
-  await chrome.storage.local.set({ sunoCaptureState: { status: "idle" } });
+  await chrome.storage.local.set({
+    sunoCaptureState: { status: "idle", stoppedAt: Date.now() },
+  });
   await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+  await refresh();
+});
+
+optionsLink.addEventListener("click", () => {
+  if (chrome.runtime.openOptionsPage) {
+    chrome.runtime.openOptionsPage();
+  }
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {

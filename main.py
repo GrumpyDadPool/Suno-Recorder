@@ -12,9 +12,15 @@ def cmd_watch(cfg, args):
 
 
 def cmd_capture(cfg, args):
-    print("Opening a browser to play through your Suno library. This takes as long "
-          "as your library's total playtime — it's real-time audio capture, there's "
-          "no way to speed it up without distorting the audio. Press Ctrl+C to stop early.")
+    print(
+        "DEPRECATED: prefer the Chrome extension in chrome_extension/ (Suno Recorder).\n"
+        "This Playwright + loopback path remains for compatibility only — see capture/DEPRECATED.md.\n"
+    )
+    print(
+        "Opening a browser to play through your Suno library. This takes as long "
+        "as your library's total playtime — it's real-time audio capture, there's "
+        "no way to speed it up without distorting the audio. Press Ctrl+C to stop early."
+    )
     try:
         core.capture_suno_library(cfg)
     except KeyboardInterrupt:
@@ -55,8 +61,8 @@ if __name__ == "__main__":
 
     sub.add_parser(
         "capture",
-        help="Play through your Suno library in a real browser and record it (alternative to "
-             "Suno's now-limited download quota)",
+        help="DEPRECATED — use chrome_extension/ (Suno Recorder). Legacy Playwright + "
+             "loopback capture of your Suno library",
     )
 
     sub.add_parser("list-platforms", help="Show every platform currently available (built-in + custom webhooks)")
