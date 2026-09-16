@@ -21,13 +21,15 @@ if (globalThis.__sunoRecorderContentLoaded) {
 } else {
   globalThis.__sunoRecorderContentLoaded = true;
 
-const ROW_TITLE_REGEX = /^Play "(.*)"$/s;
+const ROW_LABEL_REGEX = /^(Play|Pause) "(.*)"$/s;
 const MAX_SCROLL_ATTEMPTS = 200;
 const MAX_TRACK_WAIT_MS = 10 * 60 * 1000;
 const PLAYBACK_START_TIMEOUT_MS = 25_000;
-const BUTTON_FIND_SCROLL_ATTEMPTS = 80;
+const BUTTON_FIND_SCROLL_ATTEMPTS = 250;
 
 let sessionRunning = false;
+// titleKey -> approx discovery scroll index (helps remount jumps)
+const titleScrollIndex = new Map();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -53,24 +55,48 @@ async function getOptions() {
   return { maxTracks: 0, filenamePrefix: "", skipCaptured: true, monitorAudio: false };
 }
 
-function getRowPlayButtons() {
+/** Match key for library rows — strips markdown/punctuation the same way for scan + remount. */
+function titleKey(title) {
+  const normalized = (title || "")
+    .replace(/[*_`~]/g, "")
+    .replace(/[“”«»]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+  return sanitizeTitle(normalized);
+}
+
+function parseRowLabel(label) {
+  const match = (label || "").match(ROW_LABEL_REGEX);
+  if (!match) return null;
+  return { action: match[1], title: match[2] };
+}
+
+function getRowButtons() {
   return Array.from(document.querySelectorAll("button[aria-label]")).filter((btn) =>
-    ROW_TITLE_REGEX.test(btn.getAttribute("aria-label") || "")
+    parseRowLabel(btn.getAttribute("aria-label") || "")
   );
 }
 
 function extractTitle(button) {
-  const label = button.getAttribute("aria-label") || "";
-  const match = label.match(ROW_TITLE_REGEX);
-  return match ? match[1] : "Untitled";
+  const parsed = parseRowLabel(button.getAttribute("aria-label") || "");
+  return parsed ? parsed.title : "Untitled";
+}
+
+function findVisibleButtonByTitle(title) {
+  const wanted = titleKey(title);
+  return (
+    getRowButtons().find((btn) => titleKey(extractTitle(btn)) === wanted) ||
+    null
+  );
 }
 
 function collectVisibleRows() {
   const seen = new Set();
   const rows = [];
-  for (const button of getRowPlayButtons()) {
+  for (const button of getRowButtons()) {
     const title = extractTitle(button);
-    const key = sanitizeTitle(title);
+    const key = titleKey(title);
     if (!key || seen.has(key)) continue;
     seen.add(key);
     rows.push({ title, key, button });
@@ -92,8 +118,14 @@ function getScrollParent(el) {
   return document.scrollingElement || document.documentElement;
 }
 
+function libraryScroller() {
+  const buttons = getRowButtons();
+  const anchor = buttons[0] || document.body;
+  return getScrollParent(anchor);
+}
+
 function scrollLibraryDown() {
-  const buttons = getRowPlayButtons();
+  const buttons = getRowButtons();
   const anchor = buttons[buttons.length - 1] || buttons[0];
   if (!anchor) {
     window.scrollBy(0, Math.floor(window.innerHeight * 0.85));
@@ -101,9 +133,9 @@ function scrollLibraryDown() {
   }
   const scroller = getScrollParent(anchor);
   const before = scroller.scrollTop;
-  // Prefer scrolling the real list container; fall back to bringing the last row into view.
+  const step = Math.max(120, Math.floor(scroller.clientHeight * 0.75));
   if (scroller && scroller !== document.body) {
-    scroller.scrollTop = Math.min(scroller.scrollTop + Math.floor(scroller.clientHeight * 0.9), scroller.scrollHeight);
+    scroller.scrollTop = Math.min(scroller.scrollTop + step, scroller.scrollHeight);
   }
   anchor.scrollIntoView({ block: "end", behavior: "instant" });
   if (Math.abs(scroller.scrollTop - before) < 2) {
@@ -111,11 +143,38 @@ function scrollLibraryDown() {
   }
 }
 
-function harvestVisibleTitles(intoMap) {
+function scrollLibraryUp() {
+  const buttons = getRowButtons();
+  const anchor = buttons[0];
+  const scroller = libraryScroller();
+  const before = scroller.scrollTop;
+  const step = Math.max(120, Math.floor(scroller.clientHeight * 0.75));
+  scroller.scrollTop = Math.max(0, scroller.scrollTop - step);
+  if (anchor) anchor.scrollIntoView({ block: "start", behavior: "instant" });
+  if (Math.abs(scroller.scrollTop - before) < 2) {
+    window.scrollBy(0, -Math.floor(window.innerHeight * 0.85));
+  }
+}
+
+async function scrollLibraryToTop() {
+  const scroller = libraryScroller();
+  for (let i = 0; i < 20; i++) {
+    scroller.scrollTop = 0;
+    window.scrollTo(0, 0);
+    const first = getRowButtons()[0];
+    if (first) first.scrollIntoView({ block: "start", behavior: "instant" });
+    await sleep(80);
+    if (scroller.scrollTop <= 2) break;
+  }
+  await sleep(200);
+}
+
+function harvestVisibleTitles(intoMap, scrollIndex) {
   let added = 0;
   for (const row of collectVisibleRows()) {
     if (!intoMap.has(row.key)) {
       intoMap.set(row.key, row.title);
+      titleScrollIndex.set(row.key, scrollIndex || 0);
       added++;
     }
   }
@@ -123,8 +182,9 @@ function harvestVisibleTitles(intoMap) {
 }
 
 async function discoverAllTitles(log) {
+  titleScrollIndex.clear();
   const discovered = new Map();
-  harvestVisibleTitles(discovered);
+  harvestVisibleTitles(discovered, 0);
   log(`Starting scroll — ${discovered.size} tracks visible before scrolling.`);
 
   let stableRounds = 0;
@@ -136,11 +196,11 @@ async function discoverAllTitles(log) {
     // Poll for newly mounted virtualized rows (count may stay flat while titles change).
     const pollStart = Date.now();
     while (Date.now() - pollStart < 3500) {
-      harvestVisibleTitles(discovered);
+      harvestVisibleTitles(discovered, i + 1);
       if (discovered.size > lastSize) break;
       await sleep(250);
     }
-    harvestVisibleTitles(discovered);
+    harvestVisibleTitles(discovered, i + 1);
 
     if (discovered.size > lastSize) {
       log(`  scroll attempt ${i + 1}: ${discovered.size} unique titles so far (+${discovered.size - lastSize})`);
@@ -244,26 +304,54 @@ async function waitForTrackEnd(media, log) {
 }
 
 async function findButtonByTitle(title, log) {
-  const wanted = sanitizeTitle(title);
-  const direct = getRowPlayButtons().find((btn) => sanitizeTitle(extractTitle(btn)) === wanted);
-  if (direct) return direct;
+  const wanted = titleKey(title);
+  let hit = findVisibleButtonByTitle(title);
+  if (hit) return hit;
 
-  // Virtualized list: scroll from top until the row remounts.
-  log(`  row not mounted for "${title}" — scrolling to find it`);
-  const first = getRowPlayButtons()[0];
-  if (first) {
-    const scroller = getScrollParent(first);
-    scroller.scrollTop = 0;
-    first.scrollIntoView({ block: "start", behavior: "instant" });
-    await sleep(250);
+  // After a full-library scan the DOM usually only has the *bottom* viewport.
+  // Remounting a earlier row means scrolling the virtualized list until it returns.
+  log(`  looking for "${title}" in the list (row not on screen — normal for long libraries)`);
+
+  const approx = titleScrollIndex.get(wanted);
+  const scroller = libraryScroller();
+  if (typeof approx === "number" && approx > 0 && scroller.scrollHeight > scroller.clientHeight) {
+    // Jump near where we first saw it during discovery, then hunt locally.
+    const ratio = Math.min(1, approx / Math.max(1, MAX_SCROLL_ATTEMPTS));
+    scroller.scrollTop = Math.floor(scroller.scrollHeight * ratio * 0.9);
+    await sleep(350);
+    hit = findVisibleButtonByTitle(title);
+    if (hit) return hit;
   }
+
+  await scrollLibraryToTop();
+  hit = findVisibleButtonByTitle(title);
+  if (hit) return hit;
 
   for (let i = 0; i < BUTTON_FIND_SCROLL_ATTEMPTS; i++) {
-    const hit = getRowPlayButtons().find((btn) => sanitizeTitle(extractTitle(btn)) === wanted);
-    if (hit) return hit;
     scrollLibraryDown();
-    await sleep(280);
+    await sleep(220);
+    hit = findVisibleButtonByTitle(title);
+    if (hit) {
+      log(`  found "${title}" after ${i + 1} scroll(s)`);
+      return hit;
+    }
+    if ((i + 1) % 25 === 0) {
+      log(`  still searching for "${title}"… (${i + 1}/${BUTTON_FIND_SCROLL_ATTEMPTS})`);
+    }
   }
+
+  // One more pass upward from the bottom in case we overshot.
+  log(`  not found scrolling down — searching upward for "${title}"`);
+  for (let i = 0; i < BUTTON_FIND_SCROLL_ATTEMPTS; i++) {
+    scrollLibraryUp();
+    await sleep(220);
+    hit = findVisibleButtonByTitle(title);
+    if (hit) {
+      log(`  found "${title}" scrolling up`);
+      return hit;
+    }
+  }
+
   return null;
 }
 
@@ -343,7 +431,7 @@ async function runCaptureSession(log) {
   const alreadyDone = new Set(
     (state.queue || [])
       .filter((t) => t.done && !t.failed)
-      .map((t) => sanitizeTitle(t.title))
+      .map((t) => titleKey(t.title))
   );
 
   const results = [];
@@ -356,7 +444,7 @@ async function runCaptureSession(log) {
 
   for (let i = 0; i < titles.length; i++) {
     const title = titles[i];
-    const key = sanitizeTitle(title);
+    const key = titleKey(title);
 
     if (options.skipCaptured !== false && alreadyDone.has(key)) {
       log(`Skipping (already captured): ${title}`);
