@@ -73,12 +73,18 @@ async function handleMessage(message, sender) {
         throw new Error("startSession message had no tabId — can't capture");
       }
       await closeOffscreenDocumentIfExists();
-      const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+      let streamId;
+      try {
+        streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+      } catch (err) {
+        throw new Error(
+          `Tab audio permission failed: ${err && err.message ? err.message : err}. ` +
+            "Click the extension icon on a suno.com tab and try again."
+        );
+      }
       await ensureOffscreenDocument();
-      // Brief pause so the offscreen listener is attached before initStream.
-      await delay(75);
       const options = await getOptions();
-      const init = await chrome.runtime.sendMessage({
+      const init = await sendToOffscreenWithRetry({
         target: "offscreen",
         type: "initStream",
         streamId,
@@ -196,6 +202,29 @@ async function handleMessage(message, sender) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendToOffscreenWithRetry(message, attempts = 8) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i++) {
+    if (!(await offscreenDocumentExists())) {
+      await ensureOffscreenDocument();
+    }
+    await delay(50 + i * 40);
+    try {
+      const response = await chrome.runtime.sendMessage(message);
+      if (response) return response;
+      lastError = new Error("No response from offscreen document");
+    } catch (err) {
+      lastError = err;
+      // Receiving end missing — document still booting.
+    }
+  }
+  throw new Error(
+    lastError && lastError.message
+      ? lastError.message
+      : "Could not reach the offscreen audio recorder"
+  );
 }
 
 function coerceToUint8Array(buffer) {

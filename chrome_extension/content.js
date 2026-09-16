@@ -8,6 +8,19 @@
 //
 // Row aria-label pattern: `Play "Track Name"`.
 
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message && message.target === "content" && message.type === "ping") {
+    sendResponse({ ok: true, path: location.pathname });
+    return false;
+  }
+  return false;
+});
+
+if (globalThis.__sunoRecorderContentLoaded) {
+  // Extension reload can reinject; don't wire a second capture loop.
+} else {
+  globalThis.__sunoRecorderContentLoaded = true;
+
 const ROW_TITLE_REGEX = /^Play "(.*)"$/s;
 const MAX_SCROLL_ATTEMPTS = 200;
 const MAX_TRACK_WAIT_MS = 10 * 60 * 1000;
@@ -405,8 +418,12 @@ function log(message) {
 async function start() {
   if (sessionRunning) return;
   const state = await getState();
-  if (!state || state.status === "idle") return;
-  if (!location.pathname.startsWith("/me")) return;
+  // Only begin on explicit "collecting" — ignore "starting" (stream still wiring up).
+  if (!state || state.status !== "collecting") return;
+  if (!location.pathname.startsWith("/me")) {
+    log("Open suno.com/me — capture only runs on your library page.");
+    return;
+  }
 
   sessionRunning = true;
   try {
@@ -426,3 +443,5 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
   }
 });
+
+} // end __sunoRecorderContentLoaded guard
