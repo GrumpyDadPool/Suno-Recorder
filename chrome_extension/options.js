@@ -2,7 +2,7 @@ const DEFAULTS = {
   maxTracks: 0,
   filenamePrefix: "",
   skipCaptured: true,
-  monitorAudio: false,
+  monitorAudio: true,
 };
 
 const maxTracksEl = document.getElementById("maxTracks");
