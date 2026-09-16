@@ -1,42 +1,23 @@
-// Runs on suno.com/me. Stays on this one page for the whole capture session —
-// no navigating to individual track pages. Clicking each row's own inline play
-// button avoids "Similar" sidebar contamination and keeps the tab-capture
-// stream alive across the whole library pass.
+// Runs on suno.com/me. Stays on this page for the whole capture session.
 //
-// Row aria-label pattern (verified against real page HTML): `Play "Track Name"`.
+// Suno's library list is virtualized: only ~20–30 row play buttons exist in
+// the DOM at once. Scrolling replaces rows rather than appending, so a raw
+// button COUNT never grows past one viewport — that previously made discovery
+// stop at ~24 tracks and then only "see" whatever was still mounted.
+// Discovery therefore accumulates unique titles while scrolling.
+//
+// Row aria-label pattern: `Play "Track Name"`.
 
 const ROW_TITLE_REGEX = /^Play "(.*)"$/s;
-const AUDIO_SELECTOR = "audio";
-const MAX_SCROLL_ATTEMPTS = 100;
+const MAX_SCROLL_ATTEMPTS = 200;
 const MAX_TRACK_WAIT_MS = 10 * 60 * 1000;
-const PLAYBACK_START_TIMEOUT_MS = 20_000;
+const PLAYBACK_START_TIMEOUT_MS = 25_000;
+const BUTTON_FIND_SCROLL_ATTEMPTS = 80;
 
 let sessionRunning = false;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function waitForSelector(selector, timeoutMs) {
-  return new Promise((resolve) => {
-    const existing = document.querySelector(selector);
-    if (existing) {
-      resolve(existing);
-      return;
-    }
-    const observer = new MutationObserver(() => {
-      const el = document.querySelector(selector);
-      if (el) {
-        observer.disconnect();
-        resolve(el);
-      }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-    setTimeout(() => {
-      observer.disconnect();
-      resolve(document.querySelector(selector));
-    }, timeoutMs);
-  });
 }
 
 function getState() {
@@ -71,154 +52,277 @@ function extractTitle(button) {
   return match ? match[1] : "Untitled";
 }
 
-function collectUniqueRows() {
+function collectVisibleRows() {
   const seen = new Set();
   const rows = [];
   for (const button of getRowPlayButtons()) {
     const title = extractTitle(button);
     const key = sanitizeTitle(title);
-    if (seen.has(key)) continue;
+    if (!key || seen.has(key)) continue;
     seen.add(key);
     rows.push({ title, key, button });
   }
   return rows;
 }
 
-async function waitForCountToGrow(getCount, previousCount, maxWaitMs, pollIntervalMs = 300) {
-  const start = Date.now();
-  while (Date.now() - start < maxWaitMs) {
-    if (getCount() !== previousCount) return true;
-    await sleep(pollIntervalMs);
+function getScrollParent(el) {
+  let node = el && el.parentElement;
+  while (node && node !== document.body) {
+    const style = window.getComputedStyle(node);
+    const overflowY = style.overflowY;
+    if ((overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") &&
+        node.scrollHeight > node.clientHeight + 8) {
+      return node;
+    }
+    node = node.parentElement;
   }
-  return false;
+  return document.scrollingElement || document.documentElement;
 }
 
-async function scrollToLoadAll(log) {
+function scrollLibraryDown() {
+  const buttons = getRowPlayButtons();
+  const anchor = buttons[buttons.length - 1] || buttons[0];
+  if (!anchor) {
+    window.scrollBy(0, Math.floor(window.innerHeight * 0.85));
+    return;
+  }
+  const scroller = getScrollParent(anchor);
+  const before = scroller.scrollTop;
+  // Prefer scrolling the real list container; fall back to bringing the last row into view.
+  if (scroller && scroller !== document.body) {
+    scroller.scrollTop = Math.min(scroller.scrollTop + Math.floor(scroller.clientHeight * 0.9), scroller.scrollHeight);
+  }
+  anchor.scrollIntoView({ block: "end", behavior: "instant" });
+  if (Math.abs(scroller.scrollTop - before) < 2) {
+    window.scrollBy(0, Math.floor(window.innerHeight * 0.85));
+  }
+}
+
+function harvestVisibleTitles(intoMap) {
+  let added = 0;
+  for (const row of collectVisibleRows()) {
+    if (!intoMap.has(row.key)) {
+      intoMap.set(row.key, row.title);
+      added++;
+    }
+  }
+  return added;
+}
+
+async function discoverAllTitles(log) {
+  const discovered = new Map();
+  harvestVisibleTitles(discovered);
+  log(`Starting scroll — ${discovered.size} tracks visible before scrolling.`);
+
   let stableRounds = 0;
-  let lastCount = getRowPlayButtons().length;
-  log(`Starting scroll — ${lastCount} tracks visible before scrolling.`);
+  let lastSize = discovered.size;
 
   for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
-    const buttons = getRowPlayButtons();
-    const lastButton = buttons[buttons.length - 1];
-    if (lastButton) {
-      lastButton.scrollIntoView({ block: "end", behavior: "instant" });
-    } else {
-      window.scrollTo(0, document.body.scrollHeight);
+    scrollLibraryDown();
+
+    // Poll for newly mounted virtualized rows (count may stay flat while titles change).
+    const pollStart = Date.now();
+    while (Date.now() - pollStart < 3500) {
+      harvestVisibleTitles(discovered);
+      if (discovered.size > lastSize) break;
+      await sleep(250);
     }
+    harvestVisibleTitles(discovered);
 
-    const grew = await waitForCountToGrow(() => getRowPlayButtons().length, lastCount, 4000);
-    const newCount = getRowPlayButtons().length;
-    log(`  scroll attempt ${i + 1}: ${newCount} tracks so far${grew ? "" : " (no growth this attempt)"}`);
-
-    if (!grew) {
-      stableRounds++;
-      if (stableRounds >= 5) break;
-    } else {
+    if (discovered.size > lastSize) {
+      log(`  scroll attempt ${i + 1}: ${discovered.size} unique titles so far (+${discovered.size - lastSize})`);
+      lastSize = discovered.size;
       stableRounds = 0;
-      lastCount = newCount;
+    } else {
+      stableRounds++;
+      log(`  scroll attempt ${i + 1}: ${discovered.size} unique titles (no new titles this attempt)`);
+      if (stableRounds >= 8) break;
     }
   }
 
-  const total = collectUniqueRows().length;
-  log(`Scrolled through the library, found ${total} unique tracks.`);
-  return total;
+  const titles = Array.from(discovered.values());
+  log(`Scrolled through the library, found ${titles.length} unique tracks.`);
+  return titles;
 }
 
-async function waitForPlaybackStart(audio, timeoutMs) {
-  if (!audio.paused && audio.currentTime > 0) return true;
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (ok) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(ok);
-    };
-    const onPlaying = () => finish(true);
-    const onTimeUpdate = () => {
-      if (audio.currentTime > 0.05) finish(true);
-    };
-    const cleanup = () => {
-      audio.removeEventListener("playing", onPlaying);
-      audio.removeEventListener("timeupdate", onTimeUpdate);
-    };
-    audio.addEventListener("playing", onPlaying);
-    audio.addEventListener("timeupdate", onTimeUpdate);
-    setTimeout(() => finish(false), timeoutMs);
+function getMediaElements() {
+  return Array.from(document.querySelectorAll("audio, video"));
+}
+
+function findPlayingMedia() {
+  return getMediaElements().find((m) => !m.paused && !m.ended && m.currentTime > 0.05) || null;
+}
+
+function isPlaybarPlaying() {
+  return Array.from(document.querySelectorAll("button[aria-label]")).some((btn) => {
+    const label = btn.getAttribute("aria-label") || "";
+    return /^(Playbar:\s*)?Pause\b/i.test(label) || /^Pause\b/i.test(label);
   });
 }
 
-function findButtonByTitle(title) {
+async function waitForPlaybackStart(timeoutMs, log) {
+  const start = Date.now();
+  let lastMediaCount = getMediaElements().length;
+  while (Date.now() - start < timeoutMs) {
+    const playing = findPlayingMedia();
+    if (playing) return { ok: true, media: playing, via: "media-element" };
+    if (isPlaybarPlaying()) return { ok: true, media: findPlayingMedia(), via: "playbar" };
+
+    const mediaCount = getMediaElements().length;
+    if (mediaCount !== lastMediaCount) {
+      lastMediaCount = mediaCount;
+      log(`  media elements now: ${mediaCount}`);
+    }
+    await sleep(200);
+  }
+  return { ok: false, media: null, via: null };
+}
+
+async function waitForTrackEnd(media, log) {
+  const startedAt = Date.now();
+  let sawPlayback = Boolean(media && !media.paused && media.currentTime > 0.05) || isPlaybarPlaying();
+  let lastTime = media ? media.currentTime : 0;
+  let stuckMs = 0;
+
+  while (Date.now() - startedAt < MAX_TRACK_WAIT_MS) {
+    const current = findPlayingMedia() || media;
+    if (current && !current.paused && current.currentTime > 0.05) {
+      sawPlayback = true;
+      if (current.ended) {
+        log("  track ended (media ended event state)");
+        return;
+      }
+      if (current.currentTime + 0.01 < lastTime) {
+        // Seeked backwards / new track took over the same element.
+        log("  playback position jumped backward — treating as track boundary");
+        return;
+      }
+      if (Math.abs(current.currentTime - lastTime) < 0.01) {
+        stuckMs += 300;
+      } else {
+        stuckMs = 0;
+        lastTime = current.currentTime;
+      }
+      // Near the end, some players pause instead of firing ended.
+      if (current.duration && Number.isFinite(current.duration) && current.currentTime >= current.duration - 0.35) {
+        log("  reached media duration");
+        return;
+      }
+      if (stuckMs >= 8000 && current.currentTime > 1) {
+        log("  playback stalled after progress — stopping capture for this track");
+        return;
+      }
+    } else if (sawPlayback) {
+      // Was playing, now neither media nor playbar says playing.
+      if (!isPlaybarPlaying()) {
+        await sleep(400);
+        if (!findPlayingMedia() && !isPlaybarPlaying()) {
+          log("  playback stopped");
+          return;
+        }
+      }
+    } else if (isPlaybarPlaying()) {
+      sawPlayback = true;
+    }
+
+    await sleep(300);
+  }
+  log("  hit per-track time cap");
+}
+
+async function findButtonByTitle(title, log) {
   const wanted = sanitizeTitle(title);
-  for (const button of getRowPlayButtons()) {
-    if (sanitizeTitle(extractTitle(button)) === wanted) return button;
+  const direct = getRowPlayButtons().find((btn) => sanitizeTitle(extractTitle(btn)) === wanted);
+  if (direct) return direct;
+
+  // Virtualized list: scroll from top until the row remounts.
+  log(`  row not mounted for "${title}" — scrolling to find it`);
+  const first = getRowPlayButtons()[0];
+  if (first) {
+    const scroller = getScrollParent(first);
+    scroller.scrollTop = 0;
+    first.scrollIntoView({ block: "start", behavior: "instant" });
+    await sleep(250);
+  }
+
+  for (let i = 0; i < BUTTON_FIND_SCROLL_ATTEMPTS; i++) {
+    const hit = getRowPlayButtons().find((btn) => sanitizeTitle(extractTitle(btn)) === wanted);
+    if (hit) return hit;
+    scrollLibraryDown();
+    await sleep(280);
   }
   return null;
 }
 
 async function playRowAndWait(title, log) {
-  const button = findButtonByTitle(title);
+  const button = await findButtonByTitle(title, log);
   if (!button) {
-    log(`  ! row disappeared for "${title}"`);
+    log(`  ! could not find row for "${title}"`);
     return false;
   }
 
   button.scrollIntoView({ block: "center", behavior: "instant" });
-  await sleep(200);
+  await sleep(250);
 
-  await chrome.runtime.sendMessage({ target: "background", type: "startRecording", title });
-  button.click();
-
-  const audio = await waitForSelector(AUDIO_SELECTOR, 15000);
-  if (!audio) {
-    log(`  ! no audio element appeared after clicking play for "${title}"`);
-    await chrome.runtime.sendMessage({
-      target: "background",
-      type: "discardRecording",
-    });
+  const startResponse = await chrome.runtime.sendMessage({
+    target: "background",
+    type: "startRecording",
+    title,
+  });
+  if (!startResponse || !startResponse.ok) {
+    log(`  ! recorder failed to start: ${startResponse && startResponse.error ? startResponse.error : "unknown"}`);
     return false;
   }
 
-  const started = await waitForPlaybackStart(audio, PLAYBACK_START_TIMEOUT_MS);
-  if (!started) {
+  button.click();
+  await sleep(150);
+  // Some rows need a second click if the first only selects the row.
+  if (!findPlayingMedia() && !isPlaybarPlaying()) {
+    button.click();
+  }
+
+  const started = await waitForPlaybackStart(PLAYBACK_START_TIMEOUT_MS, log);
+  if (!started.ok) {
     log(`  ! playback never started for "${title}" — discarding`);
     await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
     return false;
   }
+  log(`  playback started via ${started.via}`);
 
-  await new Promise((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      resolve();
-    };
-    audio.addEventListener("ended", finish, { once: true });
-    setTimeout(finish, MAX_TRACK_WAIT_MS);
-  });
+  await waitForTrackEnd(started.media, log);
+  await sleep(600);
 
-  await sleep(500);
   const options = await getOptions();
   const prefix = options.filenamePrefix || "";
   const filename = `${prefix}${sanitizeTitle(title)}`;
-  await chrome.runtime.sendMessage({
+  const stopResponse = await chrome.runtime.sendMessage({
     target: "background",
     type: "stopRecordingAndSave",
     filename,
   });
+  if (!stopResponse || !stopResponse.ok) {
+    log(`  ! save failed: ${stopResponse && stopResponse.error ? stopResponse.error : "unknown"}`);
+    return false;
+  }
+  log(`  saved ${filename}.webm`);
   return true;
 }
 
 async function runCaptureSession(log) {
   const options = await getOptions();
-  await scrollToLoadAll(log);
+  let titles = await discoverAllTitles(log);
+  const discoveredTotal = titles.length;
 
-  let rows = collectUniqueRows();
-  const discoveredTotal = rows.length;
+  if (!discoveredTotal) {
+    log("No tracks found. Are you on suno.com/me and logged in?");
+    await setState({ status: "idle", queue: [], finishedAt: Date.now(), discoveredTotal: 0 });
+    await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+    return;
+  }
+
   if (options.maxTracks && options.maxTracks > 0) {
-    rows = rows.slice(0, options.maxTracks);
-    log(`Limiting session to first ${rows.length} of ${discoveredTotal} tracks (Options → Max tracks).`);
+    titles = titles.slice(0, options.maxTracks);
+    log(`Limiting session to first ${titles.length} of ${discoveredTotal} tracks (Options → Max tracks).`);
   }
 
   const state = await getState();
@@ -228,7 +332,7 @@ async function runCaptureSession(log) {
       .map((t) => sanitizeTitle(t.title))
   );
 
-  const results = [...(state.queue || [])];
+  const results = [];
   await setState({
     status: "capturing",
     queue: results,
@@ -236,11 +340,13 @@ async function runCaptureSession(log) {
     discoveredTotal,
   });
 
-  for (let i = 0; i < rows.length; i++) {
-    const { title, key } = rows[i];
+  for (let i = 0; i < titles.length; i++) {
+    const title = titles[i];
+    const key = sanitizeTitle(title);
 
     if (options.skipCaptured !== false && alreadyDone.has(key)) {
       log(`Skipping (already captured): ${title}`);
+      results.push({ title, done: true, failed: false, skipped: true });
       continue;
     }
 
@@ -250,7 +356,7 @@ async function runCaptureSession(log) {
       return;
     }
 
-    log(`Playing (${i + 1}/${rows.length}): ${title}`);
+    log(`Playing (${i + 1}/${titles.length}): ${title}`);
     await setState({
       status: "capturing",
       queue: results,
@@ -263,7 +369,7 @@ async function runCaptureSession(log) {
     try {
       success = await playRowAndWait(title, log);
     } catch (err) {
-      log(`  ! error capturing "${title}": ${err}`);
+      log(`  ! error capturing "${title}": ${err && err.message ? err.message : err}`);
       try {
         await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
       } catch (_) {
@@ -273,19 +379,21 @@ async function runCaptureSession(log) {
     }
 
     results.push({ title, done: true, failed: !success });
-    alreadyDone.add(key);
+    if (success) alreadyDone.add(key);
     await setState({
       status: "capturing",
       queue: results,
       currentIndex: i,
       discoveredTotal,
     });
-    await sleep(1000);
+    await sleep(800);
   }
 
   await setState({ status: "idle", queue: results, finishedAt: Date.now(), discoveredTotal });
   await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
-  log("Capture session complete.");
+  const ok = results.filter((t) => t.done && !t.failed && !t.skipped).length;
+  const failed = results.filter((t) => t.failed).length;
+  log(`Capture session complete — ${ok} saved, ${failed} failed, ${discoveredTotal} discovered.`);
 }
 
 function log(message) {
