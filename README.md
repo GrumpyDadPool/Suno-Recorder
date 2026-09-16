@@ -25,7 +25,8 @@ Full details: [`chrome_extension/README.md`](chrome_extension/README.md).
 
 Point Chrome's download folder at the same path the Distributor watcher uses,
 then run `python main.py watch` (or the GUI) to organize captures into
-`output/`. Convert WebM → WAV with ffmpeg when you need distribution masters.
+`output/`. Captures save as **WAV** (Chrome records WebM/Opus internally; the
+extension converts before download) so the watcher can pick them up directly.
 
 ### Legacy Python / Playwright capture (deprecated)
 
