@@ -55,11 +55,14 @@ def list_track_dirs(cfg: dict):
 
 def capture_suno_library(cfg: dict, stop_event=None, log=print):
     """
-    Plays through your whole Suno library in a real browser while recording
-    loopback audio, then splits the result into output/<title>/track.wav —
-    the alternative path now that Suno's own download quota is too small to
-    rely on. See capture/orchestrator.py for the pieces involved.
+    DEPRECATED — prefer chrome_extension/ (Suno Recorder).
+
+    Legacy path: Playwright + loopback audio. See capture/DEPRECATED.md.
     """
+    log(
+        "DEPRECATED: use the Suno Recorder Chrome extension in chrome_extension/ "
+        "instead of this Playwright capture path."
+    )
     from capture.orchestrator import capture_library as _capture_library
     from title_utils import sanitize_title
 

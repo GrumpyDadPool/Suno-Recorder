@@ -1,100 +1,38 @@
-# Suno Distributor
+# Suno Distributor (+ Suno Recorder)
 
-Personal tool: pull your Suno library and push it out to SoundCloud, YouTube,
-Instagram, and a Spotify-ready release package. Built for a Pro/Premier Suno
-account (paid tier = commercial rights + WAV downloads).
+Personal toolkit for getting music **off Suno** and **out to platforms**.
 
-## Getting your music off Suno now that downloads are quota-limited
+| Piece | Role |
+|-------|------|
+| **Suno Recorder** (`chrome_extension/`) | Capture your library as audio files (Chrome extension, recommended) |
+| **Suno Distributor** (Python CLI / GUI) | Watch downloads, organize tracks, push to SoundCloud / YouTube / Instagram / Spotify-prep |
 
-Two capture paths exist, solving the same problem differently:
+Built for a Pro/Premier Suno account (paid tier = commercial rights + WAV downloads).
 
-- **`chrome_extension/`** — a Chrome extension using tab audio capture.
-  Runs inside your real browser session (no Google sign-in blocking, no
-  separate login step), doesn't need to play out loud, and saves one clean
-  file per track directly. See `chrome_extension/README.md`. **This is the
-  recommended path** — fewer moving parts, fewer things that can go wrong.
-- **`python main.py capture`** (below) — browser automation + system audio
-  loopback recording. Built first, still works, needs a one-time manual
-  login workaround and Windows-specific audio capture, but useful if you'd
-  rather not install a browser extension.
+## Capture: use the Chrome extension
 
-Both record each track as its own file directly the moment it plays — no
-splitting a long recording apart afterward, and both re-read the track's
-title from its own page (not just the library list, which can go stale if a
-track was renamed) so the saved filename matches what's actually shown.
-Either way, captured files land in a folder the rest of this app already
-knows how to pick up and organize (the same folder-watching logic as a
-manual download).
-
-It opens a real browser, plays through your entire library track by track,
-and records the audio your speakers are actually outputting — the same idea
-as recording what comes out of a speaker, just done digitally. It never
-touches Suno's stream or its encryption; it only captures the legitimate
-audio your own browser has already been allowed to decrypt and play, so it
-doesn't involve circumventing anything.
-
-**What this means in practice:**
-- It takes as long as your library's total playtime — there's no way to
-  speed this up without distorting the audio, it's genuinely real-time
-- Your speakers play audio out loud during this (loopback recording captures
-  what's playing, it can't do this silently) — the GUI warns you before starting
-- Quality is whatever bitrate Suno streams at, not the WAV-master quality a
-  proper download gives you — worth using your remaining download quota on
-  your best/most important tracks first, and capture for the rest
-- It resumes correctly — tracks already in `output/` get skipped on a re-run,
-  so you can stop and restart across multiple sessions
-- Each track is recorded as its own file the moment it plays — if capture
-  gets interrupted partway through, everything captured before that point is
-  already saved as complete, individual files, nothing to lose
-
-**Before your first capture — log in once, by hand:**
-
-Google blocks sign-in inside any automation-controlled browser (it detects
-the automation flag and shows "this browser may not be secure") — this
-happens with Chrome *or* Chromium, it's not specific to either. So logging in
-has to happen outside of Playwright's control, once:
+Suno's download quota is tight. **Suno Recorder** plays through `suno.com/me`
+and saves each track via Chrome tab audio capture — no download endpoint, no
+quota burn, silent by default, inside your normal logged-in Chrome session.
 
 ```
-login_to_suno.bat
+1. chrome://extensions → Developer mode → Load unpacked → chrome_extension/
+2. Open https://suno.com/me
+3. Click the extension → Start recording
 ```
 
-This opens a completely normal, non-automated Chrome window pointed at the
-same profile folder capture reuses later. Log into Suno there like you
-normally would, confirm you can see your library, then just close that
-window. From then on, `python main.py capture` (or the GUI's Capture button)
-reuses that already-logged-in session — Playwright only takes over after
-login is done, so Google never sees an automated login attempt at all.
+Full details: [`chrome_extension/README.md`](chrome_extension/README.md).
 
-Also make sure Google Chrome is installed — capture drives your actual
-installed Chrome (not a separate downloaded browser), so there's no extra
-`playwright install` step needed for the common case. If Chrome isn't found,
-it automatically falls back to Playwright's own bundled Chromium instead
-(which *does* need a one-time `playwright install chromium`) — either way,
-the log now tells you plainly which browser actually launched, so it's never
-ambiguous which one you're looking at.
+Point Chrome's download folder at the same path the Distributor watcher uses,
+then run `python main.py watch` (or the GUI) to organize captures into
+`output/`. Convert WebM → WAV with ffmpeg when you need distribution masters.
 
-**Two things that genuinely need your machine to prove out**, flagged
-honestly rather than pretended to work:
-1. The row-button aria-label pattern in `capture/browser_player.py`
-   (`Play "Track Name"`) — verified against real page HTML pulled from the
-   live site, not guessed, but Suno's DOM could still differ in ways that
-   haven't come up yet or change over time.
-2. The loopback recorder (`capture/loopback_recorder.py`) needs real audio
-   hardware to test, which this dev environment doesn't have. Try a short
-   capture first (stop after 1-2 tracks) to confirm it's recording your
-   system audio correctly before running a full library pass.
+### Legacy Python / Playwright capture (deprecated)
 
-Capture stays on `suno.com/me` for the entire session — it never navigates
-to an individual track's own page, which earlier versions did and which
-caused two real problems: that page has a "Similar" recommendations sidebar
-showing *other people's* tracks, and full-page navigation between tracks
-didn't reliably preserve the browser's audio capture state. Staying on one
-page and clicking each row's own inline Play button avoids both.
-
-The per-track recording boundary logic (making sure each track's audio stays
-cleanly separated, with no bleed from the track before or after it) **is**
-fully tested — verified with simulated audio data against the actual
-begin/end-track state machine.
+`python main.py capture`, `login_to_suno.bat`, and `capture/` are **deprecated**.
+They need a separate browser profile, play audio out loud, and are
+Windows-oriented. Kept for reference only — see [`capture/DEPRECATED.md`](capture/DEPRECATED.md).
+**Do not commit `browser_profile/`** (cookies / login state).
 
 ## How Suno downloads work (updated — Cloudflare blocks direct API scripting)
 

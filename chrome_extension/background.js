@@ -12,30 +12,15 @@
 //
 // IMPORTANT — every message includes a `target` field ("background" or
 // "offscreen"), and every listener bails out immediately (returns false,
-// doesn't call sendResponse) for messages not addressed to it. Without this,
-// chrome.runtime.sendMessage() broadcasts to *every* listening context in
-// the extension — once the offscreen document exists, it also receives
-// messages meant only for background.js (and vice versa), and whichever
-// listener responds first wins, even if it's the wrong one. That was
-// previously producing a real bug: the offscreen document answering a
-// "startSession" message it didn't recognize with a bare {ok:false} before
-// background.js's real (slightly slower, async) handler could respond,
-// surfacing as "Couldn't start capture: undefined" in the popup.
+// doesn't call sendResponse) for messages not addressed to it.
 //
 // IMPORTANT — the capture stream is acquired ONCE, right when "Start
-// Capture" is clicked, not per track. This used to acquire a fresh stream
-// per track defensively (to guard against navigation breaking it), but
-// since capture now stays on suno.com/me for the whole session and never
-// navigates away, that defense is no longer needed — and it actively broke
-// things: chrome.tabCapture.getMediaStreamId() requires a *fresh* user
-// gesture on the target tab, and by the time the first track was ready to
-// record (after scrolling to load the whole library), that gesture had
-// gone stale, causing "Extension has not been invoked for the current page
-// (see activeTab permission)". Acquiring immediately in response to the
-// popup click — the one moment guaranteed to count as a fresh gesture —
-// fixes this.
+// recording" is clicked, not per track. chrome.tabCapture.getMediaStreamId()
+// requires a fresh user gesture; acquiring later (after library scroll)
+// fails with the activeTab permission error.
 
 const OFFSCREEN_URL = "offscreen.html";
+const KEEPALIVE_ALARM = "suno-recorder-keepalive";
 
 async function offscreenDocumentExists() {
   const existing = await chrome.runtime.getContexts({
@@ -55,18 +40,34 @@ async function ensureOffscreenDocument() {
   if (await offscreenDocumentExists()) return;
   await chrome.offscreen.createDocument({
     url: OFFSCREEN_URL,
-    reasons: ["USER_MEDIA"],
-    justification: "Records Suno tab audio during playback capture.",
+    reasons: ["USER_MEDIA", "BLOBS"],
+    justification: "Records Suno tab audio during playback capture and stages download blobs.",
   });
 }
 
+async function startKeepalive() {
+  // Chrome may clamp sub-minute periods; 1 minute is enough to keep the worker warm.
+  await chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 });
+}
+
+async function stopKeepalive() {
+  await chrome.alarms.clear(KEEPALIVE_ALARM);
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === KEEPALIVE_ALARM) {
+    // Touch storage so the worker stays responsive during long sessions.
+    chrome.storage.local.set({ sunoCaptureHeartbeat: Date.now() });
+  }
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || message.target !== "background") return false; // not for us
+  if (!message || message.target !== "background") return false;
   handleMessage(message, sender).then(sendResponse).catch((err) => {
-    console.error("Suno Capture background error:", err);
-    sendResponse({ ok: false, error: String(err) });
+    console.error("Suno Recorder background error:", err);
+    sendResponse({ ok: false, error: String(err && err.message ? err.message : err) });
   });
-  return true; // keep the message channel open for the async response
+  return true;
 });
 
 async function handleMessage(message, sender) {
@@ -76,26 +77,36 @@ async function handleMessage(message, sender) {
       if (!tabId) {
         throw new Error("startSession message had no tabId — can't capture");
       }
-      // Clean slate first: a stale offscreen document from a previous
-      // attempt (interrupted, crashed, or just never stopped) holds an
-      // active tab-capture stream, and Chrome refuses to capture the same
-      // tab twice — that's the "Cannot capture a tab with an active
-      // stream" error. Closing first prevents that.
       await closeOffscreenDocumentIfExists();
       const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
       await ensureOffscreenDocument();
-      await chrome.runtime.sendMessage({ target: "offscreen", type: "initStream", streamId });
+      const options = await getOptions();
+      await chrome.runtime.sendMessage({
+        target: "offscreen",
+        type: "initStream",
+        streamId,
+        monitorAudio: Boolean(options.monitorAudio),
+      });
+      await startKeepalive();
       return { ok: true };
     }
 
     case "startRecording": {
       await ensureOffscreenDocument();
-      await chrome.runtime.sendMessage({ target: "offscreen", type: "startRecording", title: message.title });
+      await chrome.runtime.sendMessage({
+        target: "offscreen",
+        type: "startRecording",
+        title: message.title,
+      });
       return { ok: true };
     }
 
     case "stopRecordingAndSave": {
-      await chrome.runtime.sendMessage({ target: "offscreen", type: "stopRecordingAndSave", filename: message.filename });
+      await chrome.runtime.sendMessage({
+        target: "offscreen",
+        type: "stopRecordingAndSave",
+        filename: message.filename,
+      });
       return { ok: true };
     }
 
@@ -105,33 +116,64 @@ async function handleMessage(message, sender) {
     }
 
     case "saveRecording": {
-      // Relayed from offscreen.js, which can't call chrome.downloads directly
-      // (restricted API access in that context — see the note in offscreen.js).
-      // No subfolder prefix: files land wherever Chrome's own default download
-      // location is set. Point that at wherever you want captures to end up
-      // (chrome://settings/downloads) rather than this code choosing a path —
-      // extensions can't write outside the Downloads directory regardless.
-      await chrome.downloads.download({
-        url: message.dataUrl,
-        filename: `${message.filename}.webm`,
-        saveAs: false,
-      });
+      // Prefer binary payload from offscreen (avoids data-URL size limits on long tracks).
+      let url = message.dataUrl;
+      let objectUrl = null;
+      if (message.buffer) {
+        const blob = new Blob([message.buffer], { type: message.mimeType || "audio/webm" });
+        objectUrl = URL.createObjectURL(blob);
+        url = objectUrl;
+      }
+      if (!url) {
+        throw new Error("saveRecording had no audio payload");
+      }
+      try {
+        await chrome.downloads.download({
+          url,
+          filename: `${message.filename}.webm`,
+          saveAs: false,
+        });
+      } finally {
+        if (objectUrl) {
+          // Give Chrome a moment to latch the download before revoking.
+          setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+        }
+      }
       return { ok: true };
     }
 
     case "reportError": {
-      // Relayed from offscreen.js, which can't reliably use chrome.storage
-      // directly in that context either.
-      await chrome.storage.local.set({ sunoCaptureError: message.message, sunoCaptureErrorAt: Date.now() });
+      await chrome.storage.local.set({
+        sunoCaptureError: message.message,
+        sunoCaptureErrorAt: Date.now(),
+      });
       return { ok: true };
     }
 
     case "endSession": {
+      await stopKeepalive();
       await closeOffscreenDocumentIfExists();
       return { ok: true };
     }
 
-    default:
+    case "getOptions": {
+      return { ok: true, options: await getOptions() };
+    }
+
+    default: {
       return { ok: false, error: `Unknown message type: ${message.type}` };
+    }
   }
+}
+
+async function getOptions() {
+  const local = await chrome.storage.local.get("sunoCaptureOptions");
+  if (local.sunoCaptureOptions) return local.sunoCaptureOptions;
+  const sync = await chrome.storage.sync.get({
+    maxTracks: 0,
+    filenamePrefix: "",
+    skipCaptured: true,
+    monitorAudio: false,
+  });
+  return sync;
 }

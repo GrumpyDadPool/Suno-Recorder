@@ -1,27 +1,48 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<style>
-  body { font-family: system-ui, sans-serif; width: 300px; padding: 12px; }
-  button { width: 100%; padding: 8px; margin-bottom: 8px; cursor: pointer; }
-  #status { font-size: 13px; color: #333; white-space: pre-wrap; margin-top: 8px; }
-  #log { font-size: 11px; color: #555; white-space: pre-wrap; margin-top: 4px; font-family: monospace; }
-  #error { font-size: 12px; color: #b00020; margin-top: 8px; white-space: pre-wrap; }
-  .hint { font-size: 11px; color: #777; margin-top: 10px; }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Suno Recorder</title>
+  <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <button id="startBtn">Start Capture</button>
-  <button id="stopBtn">Stop Capture</button>
-  <div id="status">Idle.</div>
-  <div id="log"></div>
-  <div id="error"></div>
-  <div class="hint">
-    Run this from a tab on suno.com/me. Log into Suno normally first if you haven't already —
-    this extension runs inside your real browser session, so there's no separate login step needed.
-    Note: this popup closes if it loses focus (normal Chrome behavior) — reopen it any time to see
-    current progress, capture keeps running in the background regardless.
+  <div class="shell">
+    <header class="brand">
+      <div class="brand-mark" aria-hidden="true"></div>
+      <div class="brand-text">
+        <h1>Suno Recorder</h1>
+        <p>Library capture · no download quota</p>
+      </div>
+    </header>
+
+    <p class="hero-line">
+      Open <strong>suno.com/me</strong>, then start. Plays each row and saves a clean WebM per track.
+    </p>
+
+    <div class="meter" id="meter" aria-hidden="true">
+      <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn-primary" id="startBtn">Start recording</button>
+      <button type="button" class="btn-secondary" id="stopBtn">Stop</button>
+    </div>
+
+    <section class="status-block" aria-live="polite">
+      <div class="status-label">Status</div>
+      <div id="status">Ready</div>
+      <div class="progress" id="progressWrap" hidden>
+        <i id="progressBar"></i>
+      </div>
+      <div id="log"></div>
+      <div id="error"></div>
+    </section>
+
+    <div class="footer-row">
+      <p class="hint">Popup can close — capture keeps running. Reopen anytime.</p>
+      <button type="button" class="linkish" id="optionsLink">Options</button>
+    </div>
   </div>
   <script src="popup.js"></script>
 </body>

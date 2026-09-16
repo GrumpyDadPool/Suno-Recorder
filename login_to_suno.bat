@@ -1,14 +1,10 @@
 @echo off
-REM Run this once before your first capture. It opens a completely normal
-REM Chrome window (not automated, not controlled by Playwright) pointed at
-REM the same profile folder the capture feature reuses later. Log into Suno
-REM normally here — since Google can't tell this apart from any other Chrome
-REM window, its "this browser may not be secure" block never triggers.
+REM DEPRECATED — prefer chrome_extension/ (Suno Recorder), which uses your
+REM normal Chrome profile and needs no separate login step.
 REM
-REM Once you're logged in and can see your library, just close this Chrome
-REM window. From then on, "python main.py capture" (or the GUI's Capture
-REM button) reuses this same profile and skips straight to an already
-REM logged-in session — Playwright only takes over after login is done.
+REM Legacy helper for python main.py capture only: opens a non-automated
+REM Chrome window pointed at browser_profile/ so you can log into Suno once
+REM outside Playwright. Do not commit browser_profile/ (cookies / login state).
 
 set PROFILE_DIR=%~dp0browser_profile
 
