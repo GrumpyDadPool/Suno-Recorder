@@ -1,0 +1,16 @@
+requests>=2.31.0
+Pillow>=10.0.0
+moviepy>=1.0.3,<2  # moviepy 2.x removed the .editor import path this code uses; pin to 1.x
+tqdm>=4.66.0
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.1.0
+keyring>=24.0.0
+numpy>=1.24.0
+playwright>=1.40.0
+
+# Windows-only: WASAPI loopback audio recording for the Capture feature
+pyaudiowpatch>=0.2.12.7; sys_platform == "win32"
+
+# only needed for building the standalone .exe, not for running from source
+pyinstaller>=6.0.0; sys_platform == "win32"
