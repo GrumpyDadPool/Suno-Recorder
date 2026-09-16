@@ -252,7 +252,7 @@ async function getOptions() {
     maxTracks: 0,
     filenamePrefix: "",
     skipCaptured: true,
-    monitorAudio: false,
+    monitorAudio: true,
   });
   return sync;
 }

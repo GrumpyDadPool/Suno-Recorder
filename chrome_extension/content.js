@@ -95,7 +95,7 @@ async function getOptions() {
   assertAlive();
   const response = await chrome.runtime.sendMessage({ target: "background", type: "getOptions" });
   if (response && response.ok && response.options) return response.options;
-  return { maxTracks: 0, filenamePrefix: "", skipCaptured: true, monitorAudio: false };
+  return { maxTracks: 0, filenamePrefix: "", skipCaptured: true, monitorAudio: true };
 }
 
 /** Match key for library rows — strips markdown/punctuation the same way for scan + remount. */
@@ -273,9 +273,100 @@ function findPlayingMedia() {
 
 function isPlaybarPlaying() {
   return Array.from(document.querySelectorAll("button[aria-label]")).some((btn) => {
-    const label = btn.getAttribute("aria-label") || "";
-    return /^(Playbar:\s*)?Pause\b/i.test(label) || /^Pause\b/i.test(label);
+    const label = (btn.getAttribute("aria-label") || "").toLowerCase();
+    if (!label.includes("pause")) return false;
+    // Prefer playbar controls; also accept a row that flipped to Pause.
+    return label.includes("playbar") || /^pause\b/.test(label) || label.includes('pause "');
   });
+}
+
+function rowLooksPlaying(title) {
+  const btn = findVisibleButtonByTitle(title);
+  if (!btn) return false;
+  const parsed = parseRowLabel(btn.getAttribute("aria-label") || "");
+  return Boolean(parsed && parsed.action === "Pause");
+}
+
+function hoverRow(button) {
+  const row =
+    button.closest('[role="row"], [role="listitem"], li, tr, [data-testid]') ||
+    button.parentElement;
+  const targets = [row, button].filter(Boolean);
+  for (const el of targets) {
+    const opts = { bubbles: true, cancelable: true, view: window };
+    el.dispatchEvent(new PointerEvent("pointerover", opts));
+    el.dispatchEvent(new MouseEvent("mouseover", opts));
+    el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, cancelable: true, view: window }));
+  }
+}
+
+function forceClick(el) {
+  if (!el) return;
+  const opts = { bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 };
+  try {
+    el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+  } catch (_) {
+    /* ignore */
+  }
+  hoverRow(el);
+  if (typeof el.focus === "function") {
+    try {
+      el.focus({ preventScroll: true });
+    } catch (_) {
+      el.focus();
+    }
+  }
+  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+    const Ctor = type.startsWith("pointer") ? PointerEvent : MouseEvent;
+    el.dispatchEvent(new Ctor(type, opts));
+  }
+  // Native click as a final fallback for listeners that only bind via onclick.
+  el.click();
+}
+
+async function clickPlayForTitle(title, button, log) {
+  const strategies = [
+    () => {
+      log("  click: play control");
+      forceClick(button);
+    },
+    () => {
+      const row = button.closest('[role="row"], [role="listitem"], li, tr') || button.parentElement;
+      log("  click: row container");
+      if (row) forceClick(row);
+      forceClick(findVisibleButtonByTitle(title) || button);
+    },
+    () => {
+      log("  click: replay after brief pause");
+      const current = findVisibleButtonByTitle(title) || button;
+      const parsed = parseRowLabel(current.getAttribute("aria-label") || "");
+      if (parsed && parsed.action === "Pause") {
+        forceClick(current);
+      }
+    },
+  ];
+
+  for (let attempt = 0; attempt < strategies.length; attempt++) {
+    const currentBtn = findVisibleButtonByTitle(title) || button;
+    const parsed = parseRowLabel(currentBtn.getAttribute("aria-label") || "");
+    if (parsed && parsed.action === "Pause" && attempt === 0) {
+      // Restart from the beginning.
+      forceClick(currentBtn);
+      await sleep(450);
+    }
+    strategies[attempt]();
+    await sleep(500);
+
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline) {
+      if (rowLooksPlaying(title) || isPlaybarPlaying() || findPlayingMedia()) {
+        return true;
+      }
+      await sleep(200);
+    }
+    log(`  playback not confirmed after click attempt ${attempt + 1}`);
+  }
+  return false;
 }
 
 async function waitForPlaybackStart(timeoutMs, log) {
@@ -408,7 +499,9 @@ async function playRowAndWait(title, log) {
   }
 
   button.scrollIntoView({ block: "center", behavior: "instant" });
-  await sleep(250);
+  await sleep(300);
+  hoverRow(button);
+  await sleep(150);
 
   const startResponse = await chrome.runtime.sendMessage({
     target: "background",
@@ -420,32 +513,18 @@ async function playRowAndWait(title, log) {
     return false;
   }
 
-  const label = parseRowLabel(button.getAttribute("aria-label") || "");
-  if (label && label.action === "Pause") {
-    // Already the active row — restart from the beginning.
-    button.click();
-    await sleep(400);
-    const playBtn = findVisibleButtonByTitle(title) || button;
-    playBtn.click();
-  } else {
-    button.click();
-  }
-  await sleep(150);
-  // Some rows need a second click if the first only selects the row.
-  if (!findPlayingMedia() && !isPlaybarPlaying()) {
-    const again = findVisibleButtonByTitle(title) || button;
-    again.click();
-  }
-
-  const started = await waitForPlaybackStart(PLAYBACK_START_TIMEOUT_MS, log);
-  if (!started.ok) {
-    log(`  ! playback never started for "${title}" — discarding`);
+  const playing = await clickPlayForTitle(title, button, log);
+  if (!playing) {
+    log(`  ! Suno never entered a playing state for "${title}" — discarding`);
     await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
     return false;
   }
-  log(`  playback started via ${started.via}`);
+  log("  site playback confirmed");
 
-  await waitForTrackEnd(started.media, log);
+  const started = await waitForPlaybackStart(Math.min(PLAYBACK_START_TIMEOUT_MS, 8000), log);
+  log(`  capturing (${started.ok ? started.via : "row/playbar state"})`);
+
+  await waitForTrackEnd(started.media || findPlayingMedia(), log);
   await sleep(600);
 
   const options = await getOptions();
