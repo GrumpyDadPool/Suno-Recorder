@@ -235,6 +235,12 @@ async function discoverAllTitles(log) {
 
   for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
     assertAlive();
+    const state = await getState();
+    if (!state || state.status === "idle") {
+      log("Scan stopped.");
+      break;
+    }
+
     scrollLibraryDown();
 
     // Poll for newly mounted virtualized rows (count may stay flat while titles change).
