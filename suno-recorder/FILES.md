@@ -1,6 +1,6 @@
 # Suno Recorder — required files
 
-Load **this folder** (`chrome_extension/`) via Chrome → Extensions → Load unpacked.
+Load **this folder** (`suno-recorder/`) via Chrome → Extensions → **Load unpacked**.
 
 Anything outside this folder is not needed for the extension to run.
 
@@ -22,7 +22,7 @@ Anything outside this folder is not needed for the extension to run.
 | `icons/icon16.png` | Toolbar / management UI |
 | `icons/icon32.png` | Toolbar / management UI |
 | `icons/icon48.png` | Toolbar / management UI |
-| `icons/icon128.png` | Chrome Web Store / management UI |
+| `icons/icon128.png` | Chrome management UI |
 | `fonts/syne-700.woff2` | Brand display font |
 | `fonts/syne-800.woff2` | Brand display font |
 | `fonts/figtree-400.woff2` | UI body font |
@@ -35,27 +35,25 @@ Anything outside this folder is not needed for the extension to run.
 | `FILES.md` | This manifesto |
 | `test_title_utils.js` | Node unit check (`node test_title_utils.js`); not loaded by Chrome |
 
-## Repo root (next to `chrome_extension/`)
+## Repo root (next to `suno-recorder/`)
 
 | Path | Keep? |
 |------|-------|
 | `README.md` | Yes — install / usage |
 | `.gitignore` | Yes |
 
-## Safe to delete on your machine (legacy Distributor / Playwright)
+## Safe to delete on your machine (legacy)
 
-If these still exist locally from older clones, they are **not** used by the extension:
+If these still exist from older clones, they are **not** used:
 
-- `capture/`, `platforms/`
-- `main.py`, `gui.py`, `core.py`, `*_client.py`, `*_watcher.py`, `title_utils.py`, …
-- `requirements.txt`, `config.json`, `config.example.json`
+- `chrome_extension/` (old folder name — use `suno-recorder/` instead)
+- `capture/`, `platforms/`, Python Distributor files (`*.py`, `requirements.txt`, …)
 - `login_to_suno.bat`, `build_exe.bat`, `*.spec`
 - `browser_profile/` (never commit — cookies/login data)
-- `suno-distributor.zip`, `output/`, `token.json`, `client_secret.json`
+- `config.json`, `token.json`, `client_secret.json`, `output/`, `*.zip`
 
-## Quick local cleanup checklist
+## Quick local checklist
 
-1. Keep a folder that contains everything under **Required** above (usually `chrome_extension/`).
-2. Point Chrome “Load unpacked” at that folder.
-3. Delete legacy Python / Playwright / Distributor paths listed above if you no longer need them.
-4. After every extension **Reload**, refresh `https://suno.com/me` before Start.
+1. Point Chrome **Load unpacked** at `suno-recorder/` (this folder).
+2. After every extension **Reload**, refresh `https://suno.com/me` before Start.
+3. Delete any leftover `chrome_extension/` or Python/Playwright paths if present.
