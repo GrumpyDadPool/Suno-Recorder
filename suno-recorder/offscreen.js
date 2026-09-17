@@ -294,7 +294,11 @@ function stopRecordingAndSave(filename) {
         }
         currentRecorder = null;
         currentChunks = [];
-        resolve({ ok: true, extension });
+        resolve({
+          ok: true,
+          extension,
+          relativePath: response.relativePath || null,
+        });
       } catch (err) {
         reject(err);
       }

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Suno Recorder",
-  "version": "1.2.1",
-  "description": "Record your Suno library track-by-track with Chrome tab audio — saves WAV files to your Chrome download folder.",
+  "version": "1.3.0",
+  "description": "Record your Suno library track-by-track with Chrome tab audio — saves WAV under a Downloads subfolder you choose.",
   "permissions": ["tabCapture", "activeTab", "downloads", "storage", "offscreen", "alarms", "tabs", "scripting"],
   "host_permissions": ["https://suno.com/*"],
   "background": {

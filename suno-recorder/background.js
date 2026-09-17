@@ -129,7 +129,11 @@ async function handleMessage(message, sender) {
       if (!response || !response.ok) {
         throw new Error(response && response.error ? response.error : "save failed");
       }
-      return { ok: true, extension: response.extension || "wav" };
+      return {
+        ok: true,
+        extension: response.extension || "wav",
+        relativePath: response.relativePath || null,
+      };
     }
 
     case "discardRecording": {
@@ -158,10 +162,14 @@ async function handleMessage(message, sender) {
       }
 
       const extension = (message.extension || "wav").replace(/^\./, "");
+      const options = await getOptions();
+      const subdir = sanitizeDownloadSubdir(options.downloadSubdir);
+      const baseName = String(message.filename || "untitled").replace(/^\/+/, "");
+      const relativePath = `${subdir}/${baseName}.${extension}`;
       try {
         const downloadId = await chrome.downloads.download({
           url,
-          filename: `${message.filename}.${extension}`,
+          filename: relativePath,
           saveAs: false,
           conflictAction: "uniquify",
         });
@@ -169,12 +177,18 @@ async function handleMessage(message, sender) {
           throw new Error("chrome.downloads.download returned no id");
         }
         await waitForDownloadSettle(downloadId, 45_000);
+        await rememberCapturedBasename(baseName);
       } finally {
         if (objectUrl) {
           setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
         }
       }
-      return { ok: true, extension };
+      return { ok: true, extension, relativePath };
+    }
+
+    case "listCapturedFiles": {
+      const basenames = await listCapturedBasenames();
+      return { ok: true, basenames };
     }
 
     case "reportError": {
@@ -294,12 +308,80 @@ function coerceToUint8Array(buffer) {
 
 async function getOptions() {
   const local = await chrome.storage.local.get("sunoCaptureOptions");
-  if (local.sunoCaptureOptions) return local.sunoCaptureOptions;
-  const sync = await chrome.storage.sync.get({
+  const defaults = {
     maxTracks: 0,
     filenamePrefix: "",
     skipCaptured: true,
     monitorAudio: true,
-  });
-  return sync;
+    downloadSubdir: "Suno Recorder",
+  };
+  if (local.sunoCaptureOptions) {
+    return { ...defaults, ...local.sunoCaptureOptions };
+  }
+  const sync = await chrome.storage.sync.get(defaults);
+  return { ...defaults, ...sync };
+}
+
+/** Relative path under Chrome's Downloads folder only (no absolute / ..). */
+function sanitizeDownloadSubdir(raw) {
+  let s = String(raw == null ? "" : raw).trim().replace(/\\/g, "/");
+  s = s.replace(/^\/+/, "");
+  s = s
+    .split("/")
+    .map((part) => part.replace(/\.\./g, "").replace(/[^\w\- .]/g, "").trim())
+    .filter(Boolean)
+    .join("/");
+  return (s || "Suno Recorder").slice(0, 80);
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function basenameFromDownloadPath(filename) {
+  const parts = String(filename || "").replace(/\\/g, "/").split("/");
+  const leaf = parts[parts.length - 1] || "";
+  return leaf.replace(/\.(wav|webm|mp3)$/i, "");
+}
+
+async function rememberCapturedBasename(baseName) {
+  const clean = String(baseName || "").trim();
+  if (!clean) return;
+  const stored = await chrome.storage.local.get("sunoCapturedBasenames");
+  const list = Array.isArray(stored.sunoCapturedBasenames) ? stored.sunoCapturedBasenames : [];
+  const lower = clean.toLowerCase();
+  if (!list.some((b) => String(b).toLowerCase() === lower)) {
+    list.push(clean);
+    // Cap growth — oldest dropped.
+    while (list.length > 20000) list.shift();
+    await chrome.storage.local.set({ sunoCapturedBasenames: list });
+  }
+}
+
+async function listCapturedBasenames() {
+  const options = await getOptions();
+  const subdir = sanitizeDownloadSubdir(options.downloadSubdir);
+  const names = new Set();
+
+  const stored = await chrome.storage.local.get("sunoCapturedBasenames");
+  for (const name of stored.sunoCapturedBasenames || []) {
+    if (name) names.add(String(name).toLowerCase());
+  }
+
+  const pattern = `${escapeRegExp(subdir)}[/\\\\][^/\\\\]+\\.(wav|webm|mp3)$`;
+  try {
+    const items = await chrome.downloads.search({
+      filenameRegex: pattern,
+      state: "complete",
+      limit: 10000,
+    });
+    for (const item of items || []) {
+      const base = basenameFromDownloadPath(item.filename);
+      if (base) names.add(base.toLowerCase());
+    }
+  } catch (err) {
+    console.warn("Suno Recorder: downloads.search for skip-done failed:", err);
+  }
+
+  return Array.from(names);
 }

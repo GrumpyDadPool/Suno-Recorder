@@ -28,10 +28,37 @@
   </div>
 
   <div class="field">
+    <label for="downloadSubdir">Save folder (under Chrome Downloads)</label>
+    <input id="downloadSubdir" type="text" maxlength="80" placeholder="Suno Recorder">
+    <div class="help">
+      Relative path only — files go to
+      <code>Downloads/&lt;this folder&gt;/</code>.
+      Does <strong>not</strong> change Chrome’s global download location
+      (<code>chrome://settings/downloads</code>). Absolute paths and
+      <code>..</code> are rejected.
+    </div>
+  </div>
+
+  <div class="field">
     <label class="checkbox">
       <input id="skipCaptured" type="checkbox" checked>
-      <span>Skip titles already marked done in this browser (resume-friendly)</span>
+      <span>Skip tracks that already have a matching file (or were marked done)</span>
     </label>
+    <div class="help">
+      Uses Chrome download history under the save folder above, plus any names
+      from a folder scan, plus this browser’s session “done” list.
+    </div>
+  </div>
+
+  <div class="field">
+    <button type="button" class="btn-secondary" id="scanFolderBtn">Scan a folder for existing files…</button>
+    <div class="help" id="scanFolderHelp">
+      Optional. Uses the File System Access picker to read <code>.wav</code> /
+      <code>.webm</code> / <code>.mp3</code> names for skip-done. Chrome cannot
+      redirect <code>chrome.downloads</code> to an arbitrary absolute path —
+      saves still use the Downloads subdirectory above. Re-scan after moving files.
+    </div>
+    <div class="help" id="scanFolderStatus"></div>
   </div>
 
   <div class="field">

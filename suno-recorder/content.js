@@ -47,6 +47,9 @@ const BUTTON_FIND_SCROLL_ATTEMPTS = 250;
 // samples land in the WebM. Overlap this with scroll/hover so we don't add
 // wall-clock delay when UI prep already takes ~450ms.
 const RECORDER_WARMUP_MS = 700;
+// Hold Suno paused while we encode/download so playbar auto-next can't start
+// track N+1 under a heavy WAV convert (that hitch was ~0.1–0.8s).
+const POST_TRACK_HOLD_MS = 500;
 
 let sessionRunning = false;
 // titleKey -> approx discovery scroll index (helps remount jumps)
@@ -99,7 +102,13 @@ async function getOptions() {
   assertAlive();
   const response = await chrome.runtime.sendMessage({ target: "background", type: "getOptions" });
   if (response && response.ok && response.options) return response.options;
-  return { maxTracks: 0, filenamePrefix: "", skipCaptured: true, monitorAudio: true };
+  return {
+    maxTracks: 0,
+    filenamePrefix: "",
+    skipCaptured: true,
+    monitorAudio: true,
+    downloadSubdir: "Suno Recorder",
+  };
 }
 
 /** Match key for library rows — strips markdown/punctuation the same way for scan + remount. */
@@ -293,6 +302,42 @@ function isPlaybarPlaying() {
   });
 }
 
+/** Stop Suno immediately so playbar auto-next cannot start the next song mid-save. */
+function pausePlayback(log) {
+  const buttons = Array.from(document.querySelectorAll("button[aria-label]"));
+  const playbarPause = buttons.find((btn) => {
+    const label = (btn.getAttribute("aria-label") || "").toLowerCase();
+    return label.includes("pause") && label.includes("playbar");
+  });
+  if (playbarPause) {
+    forceClick(playbarPause);
+    if (log) log("  paused playbar (hold until download finishes)");
+    return true;
+  }
+  const rowPause = buttons.find((btn) => {
+    const label = (btn.getAttribute("aria-label") || "").toLowerCase();
+    return /^pause\b/.test(label) || label.includes('pause "');
+  });
+  if (rowPause) {
+    forceClick(rowPause);
+    if (log) log("  paused row playback (hold until download finishes)");
+    return true;
+  }
+  let pausedMedia = false;
+  for (const media of getMediaElements()) {
+    if (!media.paused) {
+      try {
+        media.pause();
+        pausedMedia = true;
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+  if (pausedMedia && log) log("  paused media element (hold until download finishes)");
+  return pausedMedia;
+}
+
 function rowLooksPlaying(title) {
   const btn = findVisibleButtonByTitle(title);
   if (!btn) return false;
@@ -406,17 +451,24 @@ async function waitForTrackEnd(media, log) {
   let lastTime = media ? media.currentTime : 0;
   let stuckMs = 0;
 
+  const finish = (reason) => {
+    log(`  ${reason}`);
+    // Pause *before* encode/download — Suno's playbar often auto-advances even
+    // when library-list autoplay is off; that next song + our WAV convert = hitch.
+    pausePlayback(log);
+  };
+
   while (Date.now() - startedAt < MAX_TRACK_WAIT_MS) {
     const current = findPlayingMedia() || media;
     if (current && !current.paused && current.currentTime > 0.05) {
       sawPlayback = true;
       if (current.ended) {
-        log("  track ended (media ended event state)");
+        finish("track ended (media ended event state)");
         return;
       }
       if (current.currentTime + 0.01 < lastTime) {
-        // Seeked backwards / new track took over the same element.
-        log("  playback position jumped backward — treating as track boundary");
+        // Seeked backwards / new track took over the same element (Suno auto-next).
+        finish("playback position jumped backward — treating as track boundary");
         return;
       }
       if (Math.abs(current.currentTime - lastTime) < 0.01) {
@@ -425,13 +477,14 @@ async function waitForTrackEnd(media, log) {
         stuckMs = 0;
         lastTime = current.currentTime;
       }
-      // Near the end, some players pause instead of firing ended.
-      if (current.duration && Number.isFinite(current.duration) && current.currentTime >= current.duration - 0.35) {
-        log("  reached media duration");
+      // Pause slightly before natural end so we beat playbar auto-next,
+      // without trimming more than a fraction of a second.
+      if (current.duration && Number.isFinite(current.duration) && current.currentTime >= current.duration - 0.25) {
+        finish("reached media duration — pausing before auto-next");
         return;
       }
       if (stuckMs >= 8000 && current.currentTime > 1) {
-        log("  playback stalled after progress — stopping capture for this track");
+        finish("playback stalled after progress — stopping capture for this track");
         return;
       }
     } else if (sawPlayback) {
@@ -439,7 +492,7 @@ async function waitForTrackEnd(media, log) {
       if (!isPlaybarPlaying()) {
         await sleep(400);
         if (!findPlayingMedia() && !isPlaybarPlaying()) {
-          log("  playback stopped");
+          finish("playback stopped");
           return;
         }
       }
@@ -449,7 +502,7 @@ async function waitForTrackEnd(media, log) {
 
     await sleep(300);
   }
-  log("  hit per-track time cap");
+  finish("hit per-track time cap");
 }
 
 async function findButtonByTitle(title, log) {
@@ -547,11 +600,15 @@ async function playRowAndWait(title, log) {
   log(`  capturing (${started.ok ? started.via : "row/playbar state"})`);
 
   await waitForTrackEnd(started.media || findPlayingMedia(), log);
-  await sleep(600);
+  // Belt-and-suspenders: hold playback until encode + download fully settle.
+  pausePlayback(log);
+  await sleep(POST_TRACK_HOLD_MS);
 
   const options = await getOptions();
   const prefix = options.filenamePrefix || "";
   const filename = `${prefix}${sanitizeTitle(title)}`;
+  const subdir = options.downloadSubdir || "Suno Recorder";
+  log(`  encoding & downloading to ${subdir}/ (next track held)…`);
   const stopResponse = await chrome.runtime.sendMessage({
     target: "background",
     type: "stopRecordingAndSave",
@@ -562,8 +619,38 @@ async function playRowAndWait(title, log) {
     return false;
   }
   const savedAs = (stopResponse && stopResponse.extension) || "wav";
-  log(`  saved ${filename}.${savedAs}`);
+  const savedPath = stopResponse.relativePath || `${subdir}/${filename}.${savedAs}`;
+  log(`  saved ${savedPath} — download settled, ready for next`);
   return true;
+}
+
+async function fetchCapturedBasenames() {
+  try {
+    assertAlive();
+    const response = await chrome.runtime.sendMessage({
+      target: "background",
+      type: "listCapturedFiles",
+    });
+    if (response && response.ok && Array.isArray(response.basenames)) {
+      return new Set(response.basenames.map((b) => String(b).toLowerCase()));
+    }
+  } catch (_) {
+    /* ignore — fall back to session queue only */
+  }
+  return new Set();
+}
+
+function titleLooksCaptured(title, prefix, capturedBasenames) {
+  const sanitized = sanitizeTitle(title).toLowerCase();
+  if (!sanitized) return false;
+  if (capturedBasenames.has(sanitized)) return true;
+  const withPrefix = `${(prefix || "").toLowerCase()}${sanitized}`;
+  if (capturedBasenames.has(withPrefix)) return true;
+  // Also accept keys that still include an extension from a manual scan.
+  if (capturedBasenames.has(`${sanitized}.wav`) || capturedBasenames.has(`${withPrefix}.wav`)) {
+    return true;
+  }
+  return false;
 }
 
 async function runCaptureSession(log) {
@@ -590,6 +677,15 @@ async function runCaptureSession(log) {
       .map((t) => titleKey(t.title))
   );
 
+  const capturedBasenames =
+    options.skipCaptured !== false ? await fetchCapturedBasenames() : new Set();
+  if (capturedBasenames.size) {
+    log(
+      `Skip-done index: ${capturedBasenames.size} existing file name(s) under ` +
+        `"${options.downloadSubdir || "Suno Recorder"}" (Downloads history + optional folder scan).`
+    );
+  }
+
   const results = [];
   await setState({
     status: "capturing",
@@ -601,8 +697,12 @@ async function runCaptureSession(log) {
   for (let i = 0; i < titles.length; i++) {
     const title = titles[i];
     const key = titleKey(title);
+    const prefix = options.filenamePrefix || "";
 
-    if (options.skipCaptured !== false && alreadyDone.has(key)) {
+    if (
+      options.skipCaptured !== false &&
+      (alreadyDone.has(key) || titleLooksCaptured(title, prefix, capturedBasenames))
+    ) {
       log(`Skipping (already captured): ${title}`);
       results.push({ title, done: true, failed: false, skipped: true });
       continue;
@@ -637,13 +737,20 @@ async function runCaptureSession(log) {
     }
 
     results.push({ title, done: true, failed: !success });
-    if (success) alreadyDone.add(key);
+    if (success) {
+      alreadyDone.add(key);
+      capturedBasenames.add(sanitizeTitle(title).toLowerCase());
+      if (prefix) {
+        capturedBasenames.add(`${prefix}${sanitizeTitle(title)}`.toLowerCase());
+      }
+    }
     await setState({
       status: "capturing",
       queue: results,
       currentIndex: i,
       discoveredTotal,
     });
+    // Next play only after prior save settled (playRowAndWait awaits download).
     await sleep(800);
   }
 
