@@ -1,54 +1,90 @@
 # Suno Recorder
 
-Chrome extension that plays through your [Suno](https://suno.com/me) library and
-saves each track as a **WAV** file to Chrome’s download folder — using tab
-audio capture (no Suno download quota, no system-wide loopback).
+Personal Chrome extension that records your [Suno](https://suno.com/me) library
+track-by-track and saves each song as a **WAV** file to Chrome’s download folder.
 
-## Install
+Uses Chrome **tab audio capture** — no Suno download quota, no Playwright, no
+system-wide loopback. Only that tab’s audio is recorded.
 
-1. Clone or pull this repo
+**Repo:** [GrumpyDadPool/Suno-Recorder](https://github.com/GrumpyDadPool/Suno-Recorder)
+
+## Install (unpacked)
+
+1. Clone this repo:
+   ```bash
+   git clone https://github.com/GrumpyDadPool/Suno-Recorder.git
+   cd Suno-Recorder
+   ```
 2. Open `chrome://extensions`
-3. Enable **Developer mode**
-4. **Load unpacked** → select the `chrome_extension/` folder
+3. Turn on **Developer mode**
+4. **Load unpacked** → select the `suno-recorder/` folder
 
-See [`chrome_extension/FILES.md`](chrome_extension/FILES.md) for the exact
-file list (what’s required vs safe to delete).
+Required vs optional files: [`suno-recorder/FILES.md`](suno-recorder/FILES.md)
 
 ## Use
 
 1. Log into Suno in Chrome
 2. Open `https://suno.com/me`
-3. Click the extension → **Start recording**
-4. Files land in Chrome’s download location (`chrome://settings/downloads`)
+3. Click the **Suno Recorder** icon → **Start recording**
+4. WAVs appear in Chrome’s download location (`chrome://settings/downloads`)
 
-**After every extension Reload, refresh the Suno tab** before starting again.
+**After every extension Reload, refresh the Suno tab** before starting again
+(avoids “Extension context invalidated”).
 
 ### Options
 
-- Max tracks per session (use `1`–`3` to smoke-test)
-- Filename prefix
-- Skip already-captured titles
-- Speaker monitor (on by default so you can hear capture)
+Right-click the icon → **Options** (or the link in the popup):
+
+| Option | Purpose |
+|--------|---------|
+| Max tracks per session | Use `1`–`3` for a smoke test; `0` = whole library |
+| Filename prefix | Optional prefix before the sanitized title |
+| Skip already captured | Resume-friendly skip of titles marked done |
+| Speaker monitor | On by default — hear the tab while capturing |
+
+### Tips
+
+- Tab capture records **only the Suno tab** (not mic, other apps, or system sounds)
+- Stop is respected during library scan and between tracks
+- If Start seems stuck: Stop, refresh `suno.com/me`, Start again
 
 ## How it works
 
-- Stays on `/me` (no per-track page navigation)
-- Scrolls a virtualized library while collecting unique titles
-- Clicks each row’s Play control and records that tab’s audio
-- Decodes MediaRecorder output to WAV for normal players / tools
+1. Acquires a one-time tab-capture stream when you click Start
+2. Scrolls the virtualized `/me` library and collects unique track titles
+3. Remounts each row, clicks Play, confirms playback, records, encodes **WAV**
+4. Saves via `chrome.downloads` into your Chrome download folder
 
-Tab capture records **only that tab** — other apps and system sounds are not included.
+Chrome’s `MediaRecorder` only emits WebM/Opus internally; the extension decodes
+that to WAV so files open in normal players.
+
+## Project layout
+
+```
+Suno-Recorder/
+├── README.md                 ← you are here
+├── .gitignore
+└── suno-recorder/            ← Load unpacked this folder
+    ├── FILES.md              ← required-file manifesto
+    ├── manifest.json         ← v1.2.0
+    ├── background.js
+    ├── content.js
+    ├── title_utils.js
+    ├── offscreen.html / .js
+    ├── popup.html / .js / .css
+    ├── options.html / .js
+    ├── icons/
+    ├── fonts/
+    └── test_title_utils.js   ← optional Node check
+```
+
+Legacy Playwright / Python “Distributor” code has been removed from this repo.
 
 ## Development
 
 ```bash
-cd chrome_extension
-node test_title_utils.js   # optional sanitizer check
+cd suno-recorder
+node test_title_utils.js
 ```
 
-Current version: see `chrome_extension/manifest.json`.
-
-## License / account
-
-Personal tool. Requires your own Suno login in Chrome. Do not commit browser
-profiles, tokens, or download folders.
+Version: see `suno-recorder/manifest.json`.
