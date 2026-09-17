@@ -23,4 +23,4 @@ Options: max tracks, filename prefix, skip done, speaker monitor (default on).
 
 - Only this tab’s audio is recorded (not system sounds / other apps)
 - MediaRecorder captures WebM/Opus internally; converted to WAV before save
-- Version: see `manifest.json` (currently **1.2.0**)
+- Version: see `manifest.json` (currently **1.2.1**)

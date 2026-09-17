@@ -43,6 +43,10 @@ const MAX_SCROLL_ATTEMPTS = 200;
 const MAX_TRACK_WAIT_MS = 10 * 60 * 1000;
 const PLAYBACK_START_TIMEOUT_MS = 25_000;
 const BUTTON_FIND_SCROLL_ATTEMPTS = 250;
+// MediaRecorder/Opus needs a short warm-up after start() before reliable
+// samples land in the WebM. Overlap this with scroll/hover so we don't add
+// wall-clock delay when UI prep already takes ~450ms.
+const RECORDER_WARMUP_MS = 700;
 
 let sessionRunning = false;
 // titleKey -> approx discovery scroll index (helps remount jumps)
@@ -274,7 +278,10 @@ function getMediaElements() {
 }
 
 function findPlayingMedia() {
-  return getMediaElements().find((m) => !m.paused && !m.ended && m.currentTime > 0.05) || null;
+  // Accept near-zero currentTime so we don't wait until audio has already
+  // progressed before treating playback as "started" (gate is for end-detect,
+  // not for when we begin capture — capture already started before the click).
+  return getMediaElements().find((m) => !m.paused && !m.ended && m.currentTime >= 0) || null;
 }
 
 function isPlaybarPlaying() {
@@ -504,11 +511,10 @@ async function playRowAndWait(title, log) {
     return false;
   }
 
-  button.scrollIntoView({ block: "center", behavior: "instant" });
-  await sleep(300);
-  hoverRow(button);
-  await sleep(150);
-
+  // Start the MediaRecorder *before* UI prep + play click so Opus has time to
+  // warm up. Previously we started immediately before play; combined with a
+  // 1s timeslice that often clipped the first ~1s of the song in the WAV.
+  const recorderStartedAt = Date.now();
   const startResponse = await chrome.runtime.sendMessage({
     target: "background",
     type: "startRecording",
@@ -517,6 +523,16 @@ async function playRowAndWait(title, log) {
   if (!startResponse || !startResponse.ok) {
     log(`  ! recorder failed to start: ${startResponse && startResponse.error ? startResponse.error : "unknown"}`);
     return false;
+  }
+
+  button.scrollIntoView({ block: "center", behavior: "instant" });
+  await sleep(300);
+  hoverRow(button);
+  await sleep(150);
+
+  const warmedFor = Date.now() - recorderStartedAt;
+  if (warmedFor < RECORDER_WARMUP_MS) {
+    await sleep(RECORDER_WARMUP_MS - warmedFor);
   }
 
   const playing = await clickPlayForTitle(title, button, log);

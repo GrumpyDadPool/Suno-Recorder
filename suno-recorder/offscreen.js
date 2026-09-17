@@ -136,13 +136,26 @@ function startRecording(title) {
   }
   currentChunks = [];
   const mimeType = pickMimeType();
-  currentRecorder = mimeType
-    ? new MediaRecorder(persistentStream, { mimeType })
-    : new MediaRecorder(persistentStream);
+  // Modest bitrate keeps Opus encode cheaper if Chrome still does internal work.
+  const preferredOptions = mimeType
+    ? { mimeType, audioBitsPerSecond: 128_000 }
+    : { audioBitsPerSecond: 128_000 };
+  try {
+    currentRecorder = new MediaRecorder(persistentStream, preferredOptions);
+  } catch (_) {
+    currentRecorder = mimeType
+      ? new MediaRecorder(persistentStream, { mimeType })
+      : new MediaRecorder(persistentStream);
+  }
   currentRecorder.ondataavailable = (e) => {
     if (e.data && e.data.size > 0) currentChunks.push(e.data);
   };
-  currentRecorder.start(1000);
+  // No timeslice: a 1000ms timeslice flushed Opus chunks every second on the
+  // tab-capture pipeline, which hitch/stuttered Suno playback (~3s in ≈ 3rd
+  // flush) and could drop/corrupt the first chunk (~1s clipped intro). One
+  // blob on stop is fine for track-length audio; requestData() still runs in
+  // stopRecordingAndSave before stop().
+  currentRecorder.start();
 }
 
 function blobToDataUrl(blob) {
