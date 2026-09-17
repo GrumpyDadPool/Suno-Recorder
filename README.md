@@ -1,4 +1,4 @@
-# Suno Distributor
+# Suno Recorder
 
 Personal tool: pull your Suno library and push it out to SoundCloud, YouTube,
 Instagram, and a Spotify-ready release package. Built for a Pro/Premier Suno
