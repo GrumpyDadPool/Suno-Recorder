@@ -9,18 +9,14 @@ node_modules/
 .DS_Store
 Thumbs.db
 
-# Local secrets & machine-specific config (use config.example.json)
+# Secrets / local machine junk (legacy Distributor leftovers)
 config.json
 client_secret.json
 token.json
 quota_state.json
 state.json
 output/
-
-# Playwright / Chrome profile used by deprecated Python capture — NEVER commit
 browser_profile/
-
-# Build artifacts
 dist/
 build/
 *.zip

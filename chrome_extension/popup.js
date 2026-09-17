@@ -129,6 +129,17 @@ startBtn.addEventListener("click", async () => {
     }
 
     await chrome.storage.local.remove(["sunoCaptureError", "sunoCaptureLastLog"]);
+
+    // Stop any in-page session left over from a previous run, then re-arm.
+    await chrome.storage.local.set({
+      sunoCaptureState: { status: "idle", resetAt: Date.now() },
+    });
+    try {
+      await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+    } catch (_) {
+      /* ignore */
+    }
+
     await chrome.storage.local.set({
       sunoCaptureState: { status: "starting", queue: [], currentIndex: 0, startedAt: Date.now() },
     });

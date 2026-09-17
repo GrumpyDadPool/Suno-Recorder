@@ -168,6 +168,7 @@ async function handleMessage(message, sender) {
         if (downloadId === undefined) {
           throw new Error("chrome.downloads.download returned no id");
         }
+        await waitForDownloadSettle(downloadId, 45_000);
       } finally {
         if (objectUrl) {
           setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
@@ -202,6 +203,52 @@ async function handleMessage(message, sender) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForDownloadSettle(downloadId, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      cleanup();
+      // Still resolve — Chrome may finish after our wait; don't fail a good capture.
+      resolve({ timedOut: true });
+    }, timeoutMs);
+
+    const onChanged = (delta) => {
+      if (delta.id !== downloadId) return;
+      if (delta.state && delta.state.current === "complete") {
+        cleanup();
+        resolve({ complete: true });
+      } else if (delta.state && delta.state.current === "interrupted") {
+        cleanup();
+        reject(new Error(`Download interrupted for id ${downloadId}`));
+      } else if (delta.error && delta.error.current) {
+        cleanup();
+        reject(new Error(`Download error: ${delta.error.current}`));
+      }
+    };
+
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.downloads.onChanged.removeListener(onChanged);
+    };
+
+    chrome.downloads.onChanged.addListener(onChanged);
+    // In case it completed before the listener attached.
+    chrome.downloads.search({ id: downloadId }).then((items) => {
+      const item = items && items[0];
+      if (!item || settled) return;
+      if (item.state === "complete") {
+        cleanup();
+        resolve({ complete: true });
+      } else if (item.state === "interrupted") {
+        cleanup();
+        reject(new Error(`Download interrupted for id ${downloadId}`));
+      }
+    });
+  });
 }
 
 async function sendToOffscreenWithRetry(message, attempts = 8) {
