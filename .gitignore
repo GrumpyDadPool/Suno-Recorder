@@ -8,3 +8,16 @@ venv/
 node_modules/
 .DS_Store
 Thumbs.db
+
+# Secrets / local machine junk (legacy Distributor leftovers)
+config.json
+client_secret.json
+token.json
+quota_state.json
+state.json
+output/
+browser_profile/
+dist/
+build/
+*.zip
+*.exe

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Suno Recorder Options</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body class="options">
+  <header class="brand">
+    <div class="brand-mark" aria-hidden="true"></div>
+    <div class="brand-text">
+      <h1>Suno Recorder</h1>
+      <p>Capture options</p>
+    </div>
+  </header>
+
+  <div class="field">
+    <label for="maxTracks">Max tracks per session</label>
+    <input id="maxTracks" type="number" min="0" step="1" placeholder="0 = entire library">
+    <div class="help">Use 1–3 for a smoke test before a full library pass. 0 means no limit.</div>
+  </div>
+
+  <div class="field">
+    <label for="filenamePrefix">Filename prefix</label>
+    <input id="filenamePrefix" type="text" maxlength="40" placeholder="optional">
+    <div class="help">Optional prefix before the sanitized title (example: <code>suno-</code>).</div>
+  </div>
+
+  <div class="field">
+    <label class="checkbox">
+      <input id="skipCaptured" type="checkbox" checked>
+      <span>Skip titles already marked done in this browser (resume-friendly)</span>
+    </label>
+  </div>
+
+  <div class="field">
+    <label class="checkbox">
+      <input id="monitorAudio" type="checkbox" checked>
+      <span>Play captured audio through speakers while recording</span>
+    </label>
+    <div class="help">On by default so you can hear that Suno is actually playing. Turn off for silent capture.</div>
+  </div>
+
+  <div class="save-row">
+    <span id="saveMsg"></span>
+    <button type="button" class="btn-primary" id="saveBtn">Save</button>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>
