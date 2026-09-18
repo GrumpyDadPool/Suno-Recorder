@@ -28,6 +28,14 @@
   </div>
 
   <div class="field">
+    <label for="saveFolder">Save folder</label>
+    <input id="saveFolder" type="text" maxlength="120" placeholder="Suno Recorder">
+    <div class="help">Relative subfolder inside your Chrome downloads folder — files land in
+      <code>Downloads/&lt;folder&gt;/&lt;title&gt;.wav</code>. This does <strong>not</strong> change
+      Chrome’s global download location. Leave blank for the default <code>Suno Recorder</code>.</div>
+  </div>
+
+  <div class="field">
     <label class="checkbox">
       <input id="skipCaptured" type="checkbox" checked>
       <span>Skip titles already marked done in this browser (resume-friendly)</span>
@@ -40,6 +48,18 @@
       <span>Play captured audio through speakers while recording</span>
     </label>
     <div class="help">On by default so you can hear that Suno is actually playing. Turn off for silent capture.</div>
+  </div>
+
+  <div class="field">
+    <label>Scan a folder for already-saved tracks (optional)</label>
+    <div class="scan-row">
+      <button type="button" class="btn-secondary" id="scanBtn">Choose folder…</button>
+      <button type="button" class="linkish" id="scanClearBtn" hidden>Clear</button>
+      <span id="scanMsg" class="scan-msg"></span>
+    </div>
+    <input id="scanFolder" type="file" webkitdirectory directory multiple hidden>
+    <div class="help">Reads the existing audio filenames in a folder so “skip already captured” can
+      skip them even across a fresh browser. Nothing leaves your machine — only filenames are read.</div>
   </div>
 
   <div class="save-row">
