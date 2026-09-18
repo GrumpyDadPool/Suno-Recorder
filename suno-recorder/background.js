@@ -35,22 +35,25 @@ function drawIconFrame(size, t) {
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, size, size);
   const center = size / 2;
-  const coreRadius = size * 0.22;
+  // Smooth 0 -> 1 -> 0 pulse across the cycle.
+  const pulse = 0.5 - 0.5 * Math.cos(t * Math.PI * 2);
 
-  // Expanding, fading "ping" ring.
-  const ringRadius = coreRadius + t * (size * 0.46 - coreRadius);
-  ctx.globalAlpha = Math.max(0, 1 - t);
-  ctx.lineWidth = Math.max(1.5, size * 0.08);
+  // Expanding, fading "ping" ring that restarts each cycle.
+  const ringRadius = size * (0.2 + 0.28 * t);
+  ctx.globalAlpha = Math.max(0, 0.85 * (1 - t));
+  ctx.lineWidth = Math.max(1.5, size * 0.09);
   ctx.strokeStyle = "#e4a93a";
   ctx.beginPath();
   ctx.arc(center, center, ringRadius, 0, Math.PI * 2);
   ctx.stroke();
 
-  // Solid "recording" core.
+  // Recording core that grows and brightens with the pulse — the primary,
+  // clearly-visible motion even at 16px.
+  const coreRadius = size * (0.22 + 0.14 * pulse);
   ctx.globalAlpha = 1;
+  ctx.fillStyle = pulse > 0.5 ? "#ff5a5a" : "#d94b46";
   ctx.beginPath();
   ctx.arc(center, center, coreRadius, 0, Math.PI * 2);
-  ctx.fillStyle = "#e06b6b";
   ctx.fill();
 
   return ctx.getImageData(0, 0, size, size);
