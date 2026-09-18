@@ -43,6 +43,10 @@ const MAX_SCROLL_ATTEMPTS = 200;
 const MAX_TRACK_WAIT_MS = 10 * 60 * 1000;
 const PLAYBACK_START_TIMEOUT_MS = 25_000;
 const BUTTON_FIND_SCROLL_ATTEMPTS = 250;
+// Give the (timeslice-free) MediaRecorder a moment to actually start pulling
+// samples before we tell Suno to play, so the very start of each track isn't
+// clipped ("cold open"). Spec: >=700ms warm-up.
+const RECORDER_WARMUP_MS = 750;
 
 let sessionRunning = false;
 // titleKey -> approx discovery scroll index (helps remount jumps)
@@ -95,7 +99,13 @@ async function getOptions() {
   assertAlive();
   const response = await chrome.runtime.sendMessage({ target: "background", type: "getOptions" });
   if (response && response.ok && response.options) return response.options;
-  return { maxTracks: 0, filenamePrefix: "", skipCaptured: true, monitorAudio: true };
+  return {
+    maxTracks: 0,
+    filenamePrefix: "",
+    skipCaptured: true,
+    monitorAudio: true,
+    saveFolder: "Suno Recorder",
+  };
 }
 
 /** Match key for library rows — strips markdown/punctuation the same way for scan + remount. */
@@ -113,6 +123,58 @@ function parseRowLabel(label) {
   const match = (label || "").match(ROW_LABEL_REGEX);
   if (!match) return null;
   return { action: match[1], title: match[2] };
+}
+
+// Turn a previously-saved file name (from download history or a scanned folder)
+// back into the same match key discovery uses, so "skip already captured" can
+// recognise it. Strips any directory, the audio extension, and the configured
+// filename prefix before keying.
+function capturedNameToKey(name, prefix) {
+  let base = String(name || "").replace(/\\/g, "/");
+  const slash = base.lastIndexOf("/");
+  if (slash >= 0) base = base.slice(slash + 1);
+  base = base.replace(/\.(wav|webm|ogg|mp3|m4a)$/i, "");
+  if (prefix && base.startsWith(prefix)) base = base.slice(prefix.length);
+  return titleKey(base);
+}
+
+// Collect the titles we've already saved so a resumed run can skip them:
+//   1. download history under the current save folder (via background),
+//   2. an optional folder the user scanned in Options,
+//   3. the in-session done list (handled by the caller).
+async function collectPreviouslyCapturedKeys(options, log) {
+  const keys = new Set();
+  const prefix = options.filenamePrefix || "";
+
+  try {
+    const captured = await chrome.runtime.sendMessage({
+      target: "background",
+      type: "getCapturedTitles",
+      saveFolder: options.saveFolder,
+    });
+    if (captured && captured.ok && Array.isArray(captured.titles)) {
+      for (const name of captured.titles) keys.add(capturedNameToKey(name, prefix));
+      if (captured.titles.length) {
+        log(`Found ${captured.titles.length} previously downloaded file(s) under "${options.saveFolder}".`);
+      }
+    }
+  } catch (_) {
+    /* download history is best-effort */
+  }
+
+  try {
+    const scan = await chrome.storage.local.get("sunoCaptureScannedTitles");
+    const scanned = scan.sunoCaptureScannedTitles || [];
+    for (const name of scanned) keys.add(capturedNameToKey(name, prefix));
+    if (scanned.length) {
+      log(`Using ${scanned.length} title(s) from a scanned folder for skip-done.`);
+    }
+  } catch (_) {
+    /* scanned list is optional */
+  }
+
+  keys.delete("");
+  return keys;
 }
 
 function getRowButtons() {
@@ -291,6 +353,51 @@ function rowLooksPlaying(title) {
   if (!btn) return false;
   const parsed = parseRowLabel(btn.getAttribute("aria-label") || "");
   return Boolean(parsed && parsed.action === "Pause");
+}
+
+// Find the control that is currently showing a "Pause" affordance — i.e. the
+// thing Suno is actively playing. Prefer the playbar transport, then a generic
+// "Pause" button, then a row that flipped to Pause.
+function findActivePauseButton() {
+  const buttons = Array.from(document.querySelectorAll("button[aria-label]"));
+  const labelOf = (b) => (b.getAttribute("aria-label") || "").toLowerCase();
+  return (
+    buttons.find((b) => labelOf(b).includes("pause") && labelOf(b).includes("playbar")) ||
+    buttons.find((b) => /^pause\b/.test(labelOf(b))) ||
+    buttons.find((b) => labelOf(b).includes('pause "')) ||
+    null
+  );
+}
+
+// Stop all audio immediately. Suno auto-advances the playbar to the next track
+// the instant the current one ends (even with library autoplay off). If we let
+// that keep playing while we run the heavy WAV convert + download, its audio
+// bleeds into the capture and the encode/download work causes an audible
+// ~0.1-0.8s hitch. So the moment we detect a track boundary we pause the media
+// elements (most immediate) AND click the transport's Pause so Suno's own state
+// agrees and it won't silently resume.
+function pauseAllPlayback(log) {
+  let acted = false;
+
+  for (const media of getMediaElements()) {
+    if (!media.paused) {
+      try {
+        media.pause();
+        acted = true;
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+
+  const pauseBtn = findActivePauseButton();
+  if (pauseBtn) {
+    forceClick(pauseBtn);
+    acted = true;
+  }
+
+  if (log) log(acted ? "  paused playback before encode/download" : "  nothing playing to pause");
+  return acted;
 }
 
 function hoverRow(button) {
@@ -519,6 +626,9 @@ async function playRowAndWait(title, log) {
     return false;
   }
 
+  // Warm up the recorder before triggering playback so the intro isn't clipped.
+  await sleep(RECORDER_WARMUP_MS);
+
   const playing = await clickPlayForTitle(title, button, log);
   if (!playing) {
     log(`  ! Suno never entered a playing state for "${title}" — discarding`);
@@ -531,11 +641,17 @@ async function playRowAndWait(title, log) {
   log(`  capturing (${started.ok ? started.via : "row/playbar state"})`);
 
   await waitForTrackEnd(started.media || findPlayingMedia(), log);
-  await sleep(600);
+
+  // Pause the instant the track boundary is hit — BEFORE the WAV encode +
+  // download below — so Suno's auto-advanced next track can't play under (and
+  // hitch) that heavy work or bleed into the capture. The next track is started
+  // explicitly by the next loop iteration once this download has settled.
+  pauseAllPlayback(log);
+  await sleep(250);
 
   const options = await getOptions();
   const prefix = options.filenamePrefix || "";
-  const filename = `${prefix}${sanitizeTitle(title)}`;
+  const filename = buildRelativePath(options.saveFolder, prefix, title);
   const stopResponse = await chrome.runtime.sendMessage({
     target: "background",
     type: "stopRecordingAndSave",
@@ -573,6 +689,11 @@ async function runCaptureSession(log) {
       .filter((t) => t.done && !t.failed)
       .map((t) => titleKey(t.title))
   );
+
+  if (options.skipCaptured !== false) {
+    const previouslyCaptured = await collectPreviouslyCapturedKeys(options, log);
+    for (const key of previouslyCaptured) alreadyDone.add(key);
+  }
 
   const results = [];
   await setState({
