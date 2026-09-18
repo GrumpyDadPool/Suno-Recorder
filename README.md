@@ -3,7 +3,7 @@
 Chrome extension folder for **Suno Recorder** — load this directory unpacked.
 
 Plays through `suno.com/me` and saves each track as **WAV** via tab audio
-capture into Chrome’s download folder.
+capture into a subfolder of Chrome’s download folder (default `Suno Recorder`).
 
 ## Install
 
@@ -17,10 +17,12 @@ capture into Chrome’s download folder.
 2. Start recording from the popup
 3. **After every extension Reload, refresh the Suno tab**
 
-Options: max tracks, filename prefix, skip done, speaker monitor (default on).
+Options: max tracks, filename prefix, **save folder**, skip done (+ optional
+**scan a folder**), speaker monitor (default on).
 
 ## Notes
 
 - Only this tab’s audio is recorded (not system sounds / other apps)
 - MediaRecorder captures WebM/Opus internally; converted to WAV before save
-- Version: see `manifest.json` (currently **1.2.0**)
+- Files save to `Downloads/<save folder>/<prefix><title>.wav`
+- Version: see `manifest.json` (currently **1.3.0**)

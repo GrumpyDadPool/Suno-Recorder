@@ -39,7 +39,9 @@ Right-click the icon → **Options** (or the link in the popup):
 |--------|---------|
 | Max tracks per session | Use `1`–`3` for a smoke test; `0` = whole library |
 | Filename prefix | Optional prefix before the sanitized title |
+| Save folder | Relative subfolder under Chrome Downloads (default `Suno Recorder`) |
 | Skip already captured | Resume-friendly skip of titles marked done |
+| Scan a folder | Optional — read existing filenames so skip-done works across browsers |
 | Speaker monitor | On by default — hear the tab while capturing |
 
 ### Tips
@@ -52,8 +54,13 @@ Right-click the icon → **Options** (or the link in the popup):
 
 1. Acquires a one-time tab-capture stream when you click Start
 2. Scrolls the virtualized `/me` library and collects unique track titles
-3. Remounts each row, clicks Play, confirms playback, records, encodes **WAV**
-4. Saves via `chrome.downloads` into your Chrome download folder
+3. Remounts each row, warms up the recorder (≥700ms), clicks Play, confirms
+   playback, and records the whole track in one pass (no MediaRecorder timeslice)
+4. On track end it **pauses the playbar immediately** — before encoding — so
+   Suno’s auto-advance to the next track can’t bleed into the capture or hitch
+   the heavy WAV convert + download
+5. Encodes **WAV** and saves via `chrome.downloads` into
+   `Downloads/<save folder>/<prefix><title>.wav`; only then does the next track start
 
 Chrome’s `MediaRecorder` only emits WebM/Opus internally; the extension decodes
 that to WAV so files open in normal players.
@@ -66,7 +73,7 @@ Suno-Recorder/
 ├── .gitignore
 └── suno-recorder/            ← Load unpacked this folder
     ├── FILES.md              ← required-file manifesto
-    ├── manifest.json         ← v1.2.0
+    ├── manifest.json         ← v1.3.0
     ├── background.js
     ├── content.js
     ├── title_utils.js
