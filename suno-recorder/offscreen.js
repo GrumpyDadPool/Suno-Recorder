@@ -142,7 +142,11 @@ function startRecording(title) {
   currentRecorder.ondataavailable = (e) => {
     if (e.data && e.data.size > 0) currentChunks.push(e.data);
   };
-  currentRecorder.start(1000);
+  // No timeslice: encoding the whole track in one pass avoids the periodic
+  // per-chunk encode work that competed with playback and caused audible
+  // hitches. stopRecordingAndSave() calls requestData() before stop() so the
+  // buffered audio is still flushed into currentChunks.
+  currentRecorder.start();
 }
 
 function blobToDataUrl(blob) {
