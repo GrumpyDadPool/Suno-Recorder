@@ -195,6 +195,11 @@ async function handleMessage(message, sender) {
       return { ok: true, options: await getOptions() };
     }
 
+    case "getCapturedTitles": {
+      const titles = await searchCapturedTitles(message.saveFolder);
+      return { ok: true, titles };
+    }
+
     default: {
       return { ok: false, error: `Unknown message type: ${message.type}` };
     }
@@ -293,13 +298,42 @@ function coerceToUint8Array(buffer) {
 }
 
 async function getOptions() {
-  const local = await chrome.storage.local.get("sunoCaptureOptions");
-  if (local.sunoCaptureOptions) return local.sunoCaptureOptions;
-  const sync = await chrome.storage.sync.get({
+  const defaults = {
     maxTracks: 0,
     filenamePrefix: "",
     skipCaptured: true,
     monitorAudio: true,
-  });
+    saveFolder: "Suno Recorder",
+  };
+  const local = await chrome.storage.local.get("sunoCaptureOptions");
+  if (local.sunoCaptureOptions) return { ...defaults, ...local.sunoCaptureOptions };
+  const sync = await chrome.storage.sync.get(defaults);
   return sync;
+}
+
+// Look through Chrome's own download history for files this extension already
+// saved under the given relative save folder. Returns full file paths; the
+// content script reduces them to match keys. Used by "skip already captured"
+// so a resumed run doesn't re-record tracks whose WAVs are already on disk.
+async function searchCapturedTitles(saveFolder) {
+  const folder = String(saveFolder || "Suno Recorder")
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+    .toLowerCase();
+
+  let items = [];
+  try {
+    items = await chrome.downloads.search({ state: "complete", limit: 0, orderBy: ["-startTime"] });
+  } catch (_) {
+    return [];
+  }
+
+  const out = [];
+  for (const item of items) {
+    const fn = String(item.filename || "").replace(/\\/g, "/");
+    if (!/\.(wav|webm|ogg|mp3|m4a)$/i.test(fn)) continue;
+    if (folder && !fn.toLowerCase().includes(`/${folder}/`)) continue;
+    out.push(fn);
+  }
+  return out;
 }
