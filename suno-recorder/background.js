@@ -19,6 +19,71 @@
 const OFFSCREEN_URL = "offscreen.html";
 const KEEPALIVE_ALARM = "suno-recorder-keepalive";
 
+// --- Animated toolbar icon while a capture session is active ---------------
+// A toolbar action icon can't play a GIF, so we redraw it frame-by-frame via
+// chrome.action.setIcon(). The offscreen document (alive for the whole capture
+// session) sends a steady "iconTick" the MV3 service worker can't schedule
+// reliably on its own; each tick advances a radar-style pulse. On endSession we
+// restore the static packaged icon.
+const ICON_FRAMES = 12;
+const ICON_DEFAULT = { 16: "icons/icon16.png", 32: "icons/icon32.png" };
+let iconAnimating = false;
+let iconFrame = 0;
+
+function drawIconFrame(size, t) {
+  const canvas = new OffscreenCanvas(size, size);
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, size, size);
+  const center = size / 2;
+  const coreRadius = size * 0.22;
+
+  // Expanding, fading "ping" ring.
+  const ringRadius = coreRadius + t * (size * 0.46 - coreRadius);
+  ctx.globalAlpha = Math.max(0, 1 - t);
+  ctx.lineWidth = Math.max(1.5, size * 0.08);
+  ctx.strokeStyle = "#e4a93a";
+  ctx.beginPath();
+  ctx.arc(center, center, ringRadius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Solid "recording" core.
+  ctx.globalAlpha = 1;
+  ctx.beginPath();
+  ctx.arc(center, center, coreRadius, 0, Math.PI * 2);
+  ctx.fillStyle = "#e06b6b";
+  ctx.fill();
+
+  return ctx.getImageData(0, 0, size, size);
+}
+
+function renderIconFrame(frame) {
+  const t = (((frame % ICON_FRAMES) + ICON_FRAMES) % ICON_FRAMES) / ICON_FRAMES;
+  let imageData;
+  try {
+    imageData = { 16: drawIconFrame(16, t), 32: drawIconFrame(32, t) };
+  } catch (err) {
+    console.warn("Suno Recorder: could not draw icon frame:", err);
+    return;
+  }
+  Promise.resolve(chrome.action.setIcon({ imageData })).catch((err) => {
+    console.warn("Suno Recorder: setIcon failed:", err);
+  });
+}
+
+function startIconAnimation() {
+  iconAnimating = true;
+  iconFrame = 0;
+  renderIconFrame(iconFrame);
+}
+
+function stopIconAnimation() {
+  iconAnimating = false;
+  iconFrame = 0;
+  Promise.resolve(chrome.action.setIcon({ path: ICON_DEFAULT })).catch((err) => {
+    console.warn("Suno Recorder: could not restore default icon:", err);
+  });
+}
+
 async function offscreenDocumentExists() {
   const existing = await chrome.runtime.getContexts({
     contextTypes: ["OFFSCREEN_DOCUMENT"],
@@ -94,6 +159,7 @@ async function handleMessage(message, sender) {
         throw new Error(init && init.error ? init.error : "Failed to initialize tab audio capture");
       }
       await startKeepalive();
+      startIconAnimation();
       return { ok: true };
     }
 
@@ -187,7 +253,16 @@ async function handleMessage(message, sender) {
 
     case "endSession": {
       await stopKeepalive();
+      stopIconAnimation();
       await closeOffscreenDocumentIfExists();
+      return { ok: true };
+    }
+
+    case "iconTick": {
+      if (iconAnimating) {
+        iconFrame += 1;
+        renderIconFrame(iconFrame);
+      }
       return { ok: true };
     }
 
