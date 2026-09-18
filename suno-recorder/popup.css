@@ -393,6 +393,23 @@ button:disabled {
   margin-top: 2px;
 }
 
+.scan-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.scan-row .btn-secondary {
+  padding: 8px 14px;
+  font-size: 12px;
+}
+
+.scan-msg {
+  color: var(--mist);
+  font-size: 12px;
+}
+
 .save-row {
   display: flex;
   justify-content: flex-end;
