@@ -146,16 +146,17 @@ async function collectPreviouslyCapturedKeys(options, log) {
   const keys = new Set();
   const prefix = options.filenamePrefix || "";
 
+  const saveFolder = sanitizeFolder(options.saveFolder);
   try {
     const captured = await chrome.runtime.sendMessage({
       target: "background",
       type: "getCapturedTitles",
-      saveFolder: options.saveFolder,
+      saveFolder,
     });
     if (captured && captured.ok && Array.isArray(captured.titles)) {
       for (const name of captured.titles) keys.add(capturedNameToKey(name, prefix));
       if (captured.titles.length) {
-        log(`Found ${captured.titles.length} previously downloaded file(s) under "${options.saveFolder}".`);
+        log(`Found ${captured.titles.length} previously downloaded file(s) under "${saveFolder}".`);
       }
     }
   } catch (_) {
