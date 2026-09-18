@@ -293,14 +293,19 @@ async function discoverAllTitles(log) {
   harvestVisibleTitles(discovered, 0);
   log(`Starting scroll — ${discovered.size} tracks visible before scrolling.`);
 
+  // Consecutive downward scrolls with no new titles before we accept we've hit
+  // the bottom of the library and jump back to the top.
+  const STABLE_LIMIT = 3;
   let stableRounds = 0;
   let lastSize = discovered.size;
+  let stopped = false;
 
   for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
     assertAlive();
     const state = await getState();
     if (!state || state.status === "idle") {
       log("Scan stopped.");
+      stopped = true;
       break;
     }
 
@@ -323,8 +328,18 @@ async function discoverAllTitles(log) {
     } else {
       stableRounds++;
       log(`  scroll attempt ${i + 1}: ${discovered.size} unique titles (no new titles this attempt)`);
-      if (stableRounds >= 8) break;
+      if (stableRounds >= STABLE_LIMIT) {
+        log(`  no new tracks after ${STABLE_LIMIT} scroll(s) — returning to the top to start from the first song.`);
+        break;
+      }
     }
+  }
+
+  // Finish discovery back at the very top so the capture phase finds the
+  // first/next song from there instead of hunting upward from the bottom.
+  if (!stopped) {
+    await scrollLibraryToTop();
+    harvestVisibleTitles(discovered, 0);
   }
 
   const titles = Array.from(discovered.values());
