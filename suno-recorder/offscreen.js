@@ -13,6 +13,31 @@ let monitorContext = null;
 let monitorSource = null;
 let currentRecorder = null;
 let currentChunks = [];
+let iconTickTimer = null;
+
+const ICON_TICK_MS = 180;
+
+// Drive the animated toolbar icon. A service worker can't reliably run a timer,
+// but this offscreen document lives for the whole capture session, so it pings
+// the background on a steady interval to advance the icon animation. The timer
+// dies with the document when the session ends.
+function startIconTicks() {
+  stopIconTicks();
+  iconTickTimer = setInterval(() => {
+    chrome.runtime
+      .sendMessage({ target: "background", type: "iconTick" })
+      .catch(() => {
+        /* background asleep/gone — it redraws on the next tick */
+      });
+  }, ICON_TICK_MS);
+}
+
+function stopIconTicks() {
+  if (iconTickTimer !== null) {
+    clearInterval(iconTickTimer);
+    iconTickTimer = null;
+  }
+}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.target !== "offscreen") return false;
@@ -66,6 +91,7 @@ function tearDownMonitor() {
 }
 
 async function initStream(streamId, monitorAudio) {
+  stopIconTicks();
   if (persistentStream) {
     persistentStream.getTracks().forEach((track) => track.stop());
     persistentStream = null;
@@ -103,6 +129,9 @@ async function initStream(streamId, monitorAudio) {
       await monitorContext.resume();
     }
   }
+
+  // Session is live — start pinging the background to animate the toolbar icon.
+  startIconTicks();
 }
 
 function pickMimeType() {
