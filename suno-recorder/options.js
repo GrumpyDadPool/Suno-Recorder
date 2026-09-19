@@ -62,7 +62,51 @@ saveBtn.addEventListener("click", async () => {
   }, 1600);
 });
 
-scanBtn.addEventListener("click", () => scanFolderEl.click());
+async function persistScanned(titles) {
+  await chrome.storage.local.set({
+    sunoCaptureScannedTitles: titles,
+    sunoCaptureScannedAt: Date.now(),
+  });
+  renderScanned(titles.length);
+}
+
+async function collectAudioNames(dirHandle, out, depth) {
+  if (depth > 6) return;
+  for await (const entry of dirHandle.values()) {
+    if (entry.kind === "file") {
+      if (AUDIO_EXT_RE.test(entry.name)) out.push(entry.name.replace(AUDIO_EXT_RE, ""));
+    } else if (entry.kind === "directory") {
+      await collectAudioNames(entry, out, depth + 1);
+    }
+  }
+}
+
+scanBtn.addEventListener("click", async () => {
+  // Prefer the File System Access picker: it shows a normal "choose folder /
+  // view files" dialog instead of the <input webkitdirectory> "Upload N files
+  // to this site?" prompt. Nothing is uploaded either way — we only read the
+  // file names locally to know what's already been captured.
+  if (typeof window.showDirectoryPicker === "function") {
+    let dirHandle;
+    try {
+      dirHandle = await window.showDirectoryPicker({ mode: "read" });
+    } catch (err) {
+      if (err && err.name === "AbortError") return; // user cancelled the picker
+      scanMsg.textContent = "Couldn't open that folder.";
+      return;
+    }
+    try {
+      const titles = [];
+      await collectAudioNames(dirHandle, titles, 0);
+      await persistScanned(titles);
+    } catch (_) {
+      scanMsg.textContent = "Couldn't read that folder.";
+    }
+    return;
+  }
+  // Fallback for browsers without the File System Access API.
+  scanFolderEl.click();
+});
 
 scanFolderEl.addEventListener("change", async () => {
   const files = Array.from(scanFolderEl.files || []);
@@ -70,11 +114,7 @@ scanFolderEl.addEventListener("change", async () => {
     .map((file) => file.name)
     .filter((name) => AUDIO_EXT_RE.test(name))
     .map((name) => name.replace(AUDIO_EXT_RE, ""));
-  await chrome.storage.local.set({
-    sunoCaptureScannedTitles: titles,
-    sunoCaptureScannedAt: Date.now(),
-  });
-  renderScanned(titles.length);
+  await persistScanned(titles);
   // Reset so re-picking the same folder still fires a change event.
   scanFolderEl.value = "";
 });
