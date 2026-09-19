@@ -178,15 +178,6 @@ function startRecording(title) {
   currentRecorder.start();
 }
 
-function blobToDataUrl(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error || new Error("FileReader failed"));
-    reader.readAsDataURL(blob);
-  });
-}
-
 // MediaRecorder can only emit WebM/Opus (or similar) in Chrome — not WAV/MP3.
 // Decode that blob and rewrite as 16-bit PCM WAV so Downloads + the Distributor
 // watcher (which only picks up .wav/.mp3) get a normal audio file.
@@ -249,28 +240,27 @@ function audioBufferToWavBlob(audioBuffer) {
 }
 
 async function sendSavePayload(filename, blob, mimeType, extension) {
+  // Pass a short blob: URL string instead of the audio bytes. A full-length WAV
+  // sent as an ArrayBuffer (or base64 dataURL) through runtime.sendMessage blows
+  // past Chrome's 64 MiB per-message limit ("Message exceeded maximum allowed
+  // size of 64MiB"). background.js downloads straight from this URL, so only a
+  // tiny string crosses the message boundary.
+  const objectUrl = URL.createObjectURL(blob);
   try {
-    const buffer = await blob.arrayBuffer();
     const response = await chrome.runtime.sendMessage({
       target: "background",
       type: "saveRecording",
       filename,
       mimeType,
       extension,
-      buffer,
+      objectUrl,
     });
     if (response && response.ok) return response;
-    throw new Error(response && response.error ? response.error : "buffer save failed");
-  } catch (bufferErr) {
-    const dataUrl = await blobToDataUrl(blob);
-    return chrome.runtime.sendMessage({
-      target: "background",
-      type: "saveRecording",
-      filename,
-      mimeType,
-      extension,
-      dataUrl,
-    });
+    throw new Error(response && response.error ? response.error : "save failed");
+  } finally {
+    // background awaits the download settling before replying, so the blob URL
+    // has served its purpose and can be released now.
+    URL.revokeObjectURL(objectUrl);
   }
 }
 

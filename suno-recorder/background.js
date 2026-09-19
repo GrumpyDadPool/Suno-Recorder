@@ -209,8 +209,12 @@ async function handleMessage(message, sender) {
     }
 
     case "saveRecording": {
-      let url = message.dataUrl || null;
-      let objectUrl = null;
+      // Preferred path: the offscreen document hands us a blob: URL string it
+      // created, so no large payload crosses the message boundary. dataUrl/buffer
+      // are legacy fallbacks. Only revoke a URL WE create here — the offscreen
+      // document owns and revokes its own blob URL.
+      let url = message.objectUrl || message.dataUrl || null;
+      let ownedObjectUrl = null;
 
       if (!url && message.buffer) {
         const bytes = coerceToUint8Array(message.buffer);
@@ -218,8 +222,8 @@ async function handleMessage(message, sender) {
           throw new Error("saveRecording received an empty audio buffer");
         }
         const blob = new Blob([bytes], { type: message.mimeType || "audio/wav" });
-        objectUrl = URL.createObjectURL(blob);
-        url = objectUrl;
+        ownedObjectUrl = URL.createObjectURL(blob);
+        url = ownedObjectUrl;
       }
 
       if (!url) {
@@ -239,8 +243,8 @@ async function handleMessage(message, sender) {
         }
         await waitForDownloadSettle(downloadId, 45_000);
       } finally {
-        if (objectUrl) {
-          setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+        if (ownedObjectUrl) {
+          setTimeout(() => URL.revokeObjectURL(ownedObjectUrl), 60_000);
         }
       }
       return { ok: true, extension };
