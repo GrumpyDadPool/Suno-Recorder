@@ -54,8 +54,36 @@ let sessionRunning = false;
 // session keeps re-writing "capturing", so reading the stored status back is not
 // a reliable way to notice a Stop — this flag is.
 let stopRequested = false;
+let heartbeatTimer = null;
 // titleKey -> approx discovery scroll index (helps remount jumps)
 const titleScrollIndex = new Map();
+
+function touchHeartbeat() {
+  try {
+    if (!runtimeAlive()) return;
+    chrome.storage.local.set({ sunoCaptureHeartbeat: Date.now() });
+  } catch (_) {
+    /* extension reloaded — ignore */
+  }
+}
+
+function startSessionHeartbeat() {
+  touchHeartbeat();
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  heartbeatTimer = setInterval(() => {
+    if (SCRIPT_GENERATION !== globalThis.__sunoRecorderGeneration) {
+      stopSessionHeartbeat();
+      return;
+    }
+    touchHeartbeat();
+  }, 15_000);
+}
+
+function stopSessionHeartbeat() {
+  if (!heartbeatTimer) return;
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+}
 
 function assertAlive() {
   if (!runtimeAlive()) {
@@ -755,11 +783,13 @@ async function runCaptureSession(log) {
   }
 
   const results = [];
+  const startedAt = state.startedAt || Date.now();
   await setState({
     status: "capturing",
     queue: results,
     currentIndex: 0,
     discoveredTotal,
+    startedAt,
   });
 
   for (let i = 0; i < titles.length; i++) {
@@ -785,6 +815,7 @@ async function runCaptureSession(log) {
       currentIndex: i,
       currentTitle: title,
       discoveredTotal,
+      startedAt,
     });
 
     let success = false;
@@ -814,6 +845,7 @@ async function runCaptureSession(log) {
       queue: results,
       currentIndex: i,
       discoveredTotal,
+      startedAt,
     });
     await sleep(800);
   }
@@ -829,7 +861,10 @@ function log(message) {
   console.log("Suno Recorder:", message);
   try {
     if (!runtimeAlive()) return;
-    chrome.storage.local.set({ sunoCaptureLastLog: message });
+    chrome.storage.local.set({
+      sunoCaptureLastLog: message,
+      sunoCaptureHeartbeat: Date.now(),
+    });
   } catch (_) {
     /* extension reloaded — ignore */
   }
@@ -863,6 +898,7 @@ async function start() {
 
   sessionRunning = true;
   stopRequested = false;
+  startSessionHeartbeat();
   try {
     await runCaptureSession(log);
   } catch (err) {
@@ -881,6 +917,7 @@ async function start() {
       /* ignore cleanup failures after crash */
     }
   } finally {
+    stopSessionHeartbeat();
     sessionRunning = false;
   }
 }
