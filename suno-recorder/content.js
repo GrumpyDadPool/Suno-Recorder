@@ -49,6 +49,11 @@ const BUTTON_FIND_SCROLL_ATTEMPTS = 250;
 const RECORDER_WARMUP_MS = 750;
 
 let sessionRunning = false;
+// Set true the moment a Stop is observed (the popup writes an "idle" state) so
+// the running session can bail mid-track instead of only between tracks. The
+// session keeps re-writing "capturing", so reading the stored status back is not
+// a reliable way to notice a Stop — this flag is.
+let stopRequested = false;
 // titleKey -> approx discovery scroll index (helps remount jumps)
 const titleScrollIndex = new Map();
 
@@ -303,7 +308,7 @@ async function discoverAllTitles(log) {
   for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
     assertAlive();
     const state = await getState();
-    if (!state || state.status === "idle") {
+    if (stopRequested || !state || state.status === "idle") {
       log("Scan stopped.");
       stopped = true;
       break;
@@ -314,6 +319,7 @@ async function discoverAllTitles(log) {
     // Poll for newly mounted virtualized rows (count may stay flat while titles change).
     const pollStart = Date.now();
     while (Date.now() - pollStart < 3500) {
+      if (stopRequested) break;
       assertAlive();
       harvestVisibleTitles(discovered, i + 1);
       if (discovered.size > lastSize) break;
@@ -476,6 +482,7 @@ async function clickPlayForTitle(title, button, log) {
   ];
 
   for (let attempt = 0; attempt < strategies.length; attempt++) {
+    if (stopRequested) return false;
     const currentBtn = findVisibleButtonByTitle(title) || button;
     const parsed = parseRowLabel(currentBtn.getAttribute("aria-label") || "");
     if (parsed && parsed.action === "Pause" && attempt === 0) {
@@ -488,6 +495,7 @@ async function clickPlayForTitle(title, button, log) {
 
     const deadline = Date.now() + 4000;
     while (Date.now() < deadline) {
+      if (stopRequested) return false;
       if (rowLooksPlaying(title) || isPlaybarPlaying() || findPlayingMedia()) {
         return true;
       }
@@ -502,6 +510,7 @@ async function waitForPlaybackStart(timeoutMs, log) {
   const start = Date.now();
   let lastMediaCount = getMediaElements().length;
   while (Date.now() - start < timeoutMs) {
+    if (stopRequested) return { ok: false, media: null, via: null };
     const playing = findPlayingMedia();
     if (playing) return { ok: true, media: playing, via: "media-element" };
     if (isPlaybarPlaying()) return { ok: true, media: findPlayingMedia(), via: "playbar" };
@@ -523,6 +532,10 @@ async function waitForTrackEnd(media, log) {
   let stuckMs = 0;
 
   while (Date.now() - startedAt < MAX_TRACK_WAIT_MS) {
+    if (stopRequested) {
+      log("  stop requested — ending capture of this track");
+      return;
+    }
     const current = findPlayingMedia() || media;
     if (current && !current.paused && current.currentTime > 0.05) {
       sawPlayback = true;
@@ -593,6 +606,7 @@ async function findButtonByTitle(title, log) {
   if (hit) return hit;
 
   for (let i = 0; i < BUTTON_FIND_SCROLL_ATTEMPTS; i++) {
+    if (stopRequested) return null;
     scrollLibraryDown();
     await sleep(220);
     hit = findVisibleButtonByTitle(title);
@@ -608,6 +622,7 @@ async function findButtonByTitle(title, log) {
   // One more pass upward from the bottom in case we overshot.
   log(`  not found scrolling down — searching upward for "${title}"`);
   for (let i = 0; i < BUTTON_FIND_SCROLL_ATTEMPTS; i++) {
+    if (stopRequested) return null;
     scrollLibraryUp();
     await sleep(220);
     hit = findVisibleButtonByTitle(title);
@@ -645,6 +660,15 @@ async function playRowAndWait(title, log) {
   // Warm up the recorder before triggering playback so the intro isn't clipped.
   await sleep(RECORDER_WARMUP_MS);
 
+  if (stopRequested) {
+    try {
+      await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
+    } catch (_) {
+      /* offscreen may already be gone after Stop */
+    }
+    return false;
+  }
+
   const playing = await clickPlayForTitle(title, button, log);
   if (!playing) {
     log(`  ! Suno never entered a playing state for "${title}" — discarding`);
@@ -657,6 +681,17 @@ async function playRowAndWait(title, log) {
   log(`  capturing (${started.ok ? started.via : "row/playbar state"})`);
 
   await waitForTrackEnd(started.media || findPlayingMedia(), log);
+
+  if (stopRequested) {
+    log("  stop requested — discarding the in-progress track");
+    pauseAllPlayback(log);
+    try {
+      await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
+    } catch (_) {
+      /* offscreen may already be gone after Stop */
+    }
+    return false;
+  }
 
   // Pause the instant the track boundary is hit — BEFORE the WAV encode +
   // download below — so Suno's auto-advanced next track can't play under (and
@@ -685,6 +720,14 @@ async function playRowAndWait(title, log) {
 async function runCaptureSession(log) {
   const options = await getOptions();
   let titles = await discoverAllTitles(log);
+
+  if (stopRequested) {
+    log("Capture stopped.");
+    await setState({ status: "idle", stoppedAt: Date.now() });
+    await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+    return;
+  }
+
   const discoveredTotal = titles.length;
 
   if (!discoveredTotal) {
@@ -730,9 +773,9 @@ async function runCaptureSession(log) {
     }
 
     const current = await getState();
-    if (!current || current.status === "idle") {
+    if (stopRequested || !current || current.status === "idle") {
       log("Capture stopped.");
-      return;
+      break;
     }
 
     log(`Playing (${i + 1}/${titles.length}): ${title}`);
@@ -755,6 +798,13 @@ async function runCaptureSession(log) {
         /* ignore */
       }
       success = false;
+    }
+
+    // A Stop during the track must win — do NOT re-write "capturing" below,
+    // which would clobber the popup's idle state and let the session roll on.
+    if (stopRequested) {
+      log("Capture stopped.");
+      break;
     }
 
     results.push({ title, done: true, failed: !success });
@@ -812,6 +862,7 @@ async function start() {
   }
 
   sessionRunning = true;
+  stopRequested = false;
   try {
     await runCaptureSession(log);
   } catch (err) {
@@ -843,6 +894,11 @@ chrome.storage.onChanged.addListener((changes, area) => {
     const newState = changes.sunoCaptureState.newValue;
     if (newState && newState.status === "collecting") {
       start();
+    }
+    // Honor Stop immediately. The popup writes { status: "idle", stoppedAt } —
+    // flag it so an in-flight session aborts the current track right away.
+    if (sessionRunning && (!newState || newState.status === "idle")) {
+      stopRequested = true;
     }
   }
 });
