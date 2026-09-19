@@ -11,6 +11,24 @@ const optionsLink = document.getElementById("optionsLink");
 const START_TIMEOUT_MS = 20_000;
 const STALE_SESSION_MS = 2 * 60 * 1000;
 
+function parseSunoTabUrl(urlString) {
+  try {
+    const parsed = new URL(urlString);
+    const host = parsed.hostname.toLowerCase();
+    const isSunoHost = host === "suno.com" || host.endsWith(".suno.com");
+    if (parsed.protocol !== "https:" || !isSunoHost) {
+      return null;
+    }
+    return parsed;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isSunoLibraryPath(pathname) {
+  return pathname === "/me" || pathname.startsWith("/me/");
+}
+
 function setBusy(isBusy) {
   startBtn.disabled = isBusy;
   meterEl.classList.toggle("active", isBusy);
@@ -123,8 +141,8 @@ startBtn.addEventListener("click", async () => {
     if (!tab || !tab.id) {
       throw new Error("Couldn't find the active tab.");
     }
-    const url = tab.url || "";
-    if (!url.includes("suno.com")) {
+    const parsed = parseSunoTabUrl(tab.url || "");
+    if (!parsed) {
       throw new Error("Open suno.com/me in this tab first, then click Start recording.");
     }
 
@@ -159,7 +177,7 @@ startBtn.addEventListener("click", async () => {
     }
 
     // Make sure the library scraper is alive (reload extension ≠ refresh page).
-    if (url.includes("/me")) {
+    if (isSunoLibraryPath(parsed.pathname)) {
       await ensureContentScript(tab.id);
     }
 
@@ -172,7 +190,7 @@ startBtn.addEventListener("click", async () => {
       },
     });
 
-    if (!url.includes("/me")) {
+    if (!isSunoLibraryPath(parsed.pathname)) {
       await chrome.tabs.update(tab.id, { url: "https://suno.com/me" });
     }
 
