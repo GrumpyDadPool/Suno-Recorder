@@ -95,19 +95,15 @@ async function refresh() {
 }
 
 async function maybeClearStaleSession(state, heartbeat) {
-  if (!state || (state.status !== "collecting" && state.status !== "capturing" && state.status !== "starting")) {
+  // Liveness is the heartbeat the content script writes while scanning / capturing.
+  // An empty queue is normal for a long library scroll and the first-track hunt.
+  if (!isSessionStale(state, heartbeat, Date.now(), STALE_SESSION_MS)) {
     return;
   }
-  const startedAt = state.startedAt || 0;
-  const lastBeat = heartbeat || startedAt;
-  const age = Date.now() - Math.max(startedAt, lastBeat);
-  // If a previous run died mid-session, Start stays disabled forever without this.
-  if (age > STALE_SESSION_MS && !(state.queue || []).some((t) => t.done)) {
-    await chrome.storage.local.set({
-      sunoCaptureState: { status: "idle", resetAt: Date.now(), resetReason: "stale-session" },
-      sunoCaptureError: "Previous session looked stuck and was reset. Try Start recording again.",
-    });
-  }
+  await chrome.storage.local.set({
+    sunoCaptureState: { status: "idle", resetAt: Date.now(), resetReason: "stale-session" },
+    sunoCaptureError: "Previous session looked stuck and was reset. Try Start recording again.",
+  });
 }
 
 function withTimeout(promise, ms, message) {
