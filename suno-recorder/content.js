@@ -141,10 +141,9 @@ async function getOptions() {
   };
 }
 
-/** Match key for library rows — strips markdown/punctuation the same way for scan + remount. */
+/** Match key for library rows, skip-done, and remount — same rules as the saved filename. */
 function titleKey(title) {
   const normalized = (title || "")
-    .replace(/[*_`~]/g, "")
     .replace(/[“”«»]/g, '"')
     .replace(/[‘’]/g, "'")
     .replace(/\s+/g, " ")
