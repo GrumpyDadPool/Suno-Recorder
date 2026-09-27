@@ -141,14 +141,28 @@ async function getOptions() {
   };
 }
 
-/** Match key for library rows, skip-done, and remount — same rules as the saved filename. */
-function titleKey(title) {
-  const normalized = (title || "")
+function normalizeTitleForKey(title) {
+  return (title || "")
     .replace(/[“”«»]/g, '"')
     .replace(/[‘’]/g, "'")
     .replace(/\s+/g, " ")
     .trim();
-  return sanitizeTitle(normalized);
+}
+
+/** Match key for library rows, skip-done, and remount — same rules as the saved filename. */
+function titleKey(title) {
+  return sanitizeTitle(normalizeTitleForKey(title));
+}
+
+/** Match key for files saved before punctuation-preserving filenames (v1.3). */
+function legacyTitleKey(title) {
+  return legacySanitizeTitle(normalizeTitleForKey(title));
+}
+
+function isAlreadyCaptured(title, capturedKeys) {
+  const key = titleKey(title);
+  if (capturedKeys.has(key)) return true;
+  return capturedKeys.has(legacyTitleKey(title));
 }
 
 function parseRowLabel(label) {
@@ -795,7 +809,7 @@ async function runCaptureSession(log) {
     const title = titles[i];
     const key = titleKey(title);
 
-    if (options.skipCaptured !== false && alreadyDone.has(key)) {
+    if (options.skipCaptured !== false && isAlreadyCaptured(title, alreadyDone)) {
       log(`Skipping (already captured): ${title}`);
       results.push({ title, done: true, failed: false, skipped: true });
       continue;

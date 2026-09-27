@@ -2,7 +2,7 @@
 // allows. `#`, apostrophes, parentheses, `&`, etc. stay. Characters that
 // Windows / Chrome downloads reject are mapped to lookalikes (or dropped)
 // instead of stripping all punctuation.
-const FILE_UNSAFE = /[<>:"/\\|?*\u0000-\u001f]/g;
+const FILE_UNSAFE = /[<>:"/\\|?*~\u0000-\u001f]/g;
 const FILE_REPLACEMENTS = {
   "<": "",
   ">": "",
@@ -13,16 +13,27 @@ const FILE_REPLACEMENTS = {
   "|": "-",
   "?": "？",
   "*": "＊",
+  "~": "～",
 };
 
 function sanitizeTitle(title, fallback = "untitled") {
   const cleaned = String(title || "")
     .replace(FILE_UNSAFE, (ch) => FILE_REPLACEMENTS[ch] ?? "")
+    .replace(/\p{Cf}/gu, "")
     .replace(/\s+/g, " ")
     .replace(/[. ]+$/g, "")
     .trim();
   if (!cleaned || cleaned === "." || cleaned === "..") return fallback;
   return cleaned;
+}
+
+// Pre–punctuation-preservation sanitizer: strip everything except word chars,
+// spaces, and hyphens. Used so skip-done still matches files saved before v1.3.
+function legacySanitizeTitle(title, fallback = "untitled") {
+  const cleaned = String(title || "")
+    .replace(/[^\w\- ]/g, "")
+    .trim();
+  return cleaned || fallback;
 }
 
 // Sanitize a user-supplied "save folder" into a safe RELATIVE subpath under
@@ -54,5 +65,5 @@ function buildRelativePath(folder, prefix, title, fallback = "Suno Recorder") {
 // Node doesn't have `self`/`window` the way a content script does — this
 // export is only used by the Node-based unit test, not by Chrome itself.
 if (typeof module !== "undefined") {
-  module.exports = { sanitizeTitle, sanitizeFolder, buildRelativePath };
+  module.exports = { sanitizeTitle, legacySanitizeTitle, sanitizeFolder, buildRelativePath };
 }
