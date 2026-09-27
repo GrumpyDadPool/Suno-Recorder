@@ -1,9 +1,28 @@
-// Mirrors title_utils.py's sanitize_title() so filenames this extension saves
-// match what the Python side (suno_watcher.py) would produce for the same
-// title, if it ever needs to re-derive a folder name from a filename.
+// Filename sanitizer: keep the Suno title as close to exact as the filesystem
+// allows. `#`, apostrophes, parentheses, `&`, etc. stay. Characters that
+// Windows / Chrome downloads reject are mapped to lookalikes (or dropped)
+// instead of stripping all punctuation.
+const FILE_UNSAFE = /[<>:"/\\|?*\u0000-\u001f]/g;
+const FILE_REPLACEMENTS = {
+  "<": "",
+  ">": "",
+  ":": "：",
+  '"': "'",
+  "/": "-",
+  "\\": "-",
+  "|": "-",
+  "?": "？",
+  "*": "＊",
+};
+
 function sanitizeTitle(title, fallback = "untitled") {
-  const cleaned = (title || "").replace(/[^\w\- ]/g, "").trim();
-  return cleaned || fallback;
+  const cleaned = String(title || "")
+    .replace(FILE_UNSAFE, (ch) => FILE_REPLACEMENTS[ch] ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/[. ]+$/g, "")
+    .trim();
+  if (!cleaned || cleaned === "." || cleaned === "..") return fallback;
+  return cleaned;
 }
 
 // Sanitize a user-supplied "save folder" into a safe RELATIVE subpath under
@@ -22,9 +41,10 @@ function sanitizeFolder(folder, fallback = "Suno Recorder") {
 
 // Build the relative download path (no extension) for a track:
 //   <saveFolder>/<prefix><sanitized title>
-// The folder is sanitized to stay inside Downloads; the title is sanitized the
-// same way it always has been. chrome.downloads.download() appends the ".wav"
-// extension and creates the subfolder under the user's Downloads directory.
+// The folder is sanitized to stay inside Downloads; the title keeps punctuation
+// that filesystems allow (including #) and maps * / ? / : to lookalikes.
+// chrome.downloads.download() appends the extension and creates the subfolder
+// under the user's Downloads directory.
 function buildRelativePath(folder, prefix, title, fallback = "Suno Recorder") {
   const dir = sanitizeFolder(folder, fallback);
   const base = `${prefix || ""}${sanitizeTitle(title)}`;
