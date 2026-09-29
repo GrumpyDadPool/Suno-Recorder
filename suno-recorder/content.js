@@ -47,6 +47,11 @@ const BUTTON_FIND_SCROLL_ATTEMPTS = 250;
 // samples before we tell Suno to play, so the very start of each track isn't
 // clipped ("cold open"). Spec: >=700ms warm-up.
 const RECORDER_WARMUP_MS = 750;
+// Lyrics often paint with the cover. If they are already on screen, save at once.
+// Otherwise keep reading and give the panel 4 seconds of unchanged empty content
+// before deciding there are no lyrics. Stop is the only cancel.
+const LYRICS_POLL_MS = 400;
+const LYRICS_ABSENT_STABLE_MS = 4000;
 
 let sessionRunning = false;
 let startPending = false;
@@ -144,6 +149,19 @@ async function getOptions() {
   };
 }
 
+async function fetchSavedSidecars(saveFolder) {
+  assertAlive();
+  const response = await chrome.runtime.sendMessage({
+    target: "background",
+    type: "listSavedSidecars",
+    saveFolder,
+  });
+  if (!response || !response.ok || !Array.isArray(response.files)) {
+    throw new Error(response && response.error ? response.error : "could not list saved lyrics and covers");
+  }
+  return response.files;
+}
+
 function parseRowLabel(label) {
   const match = (label || "").match(ROW_LABEL_REGEX);
   if (!match) return null;
@@ -234,20 +252,18 @@ function scrollLibraryDown() {
   if (scroller && scroller !== document.body) {
     scroller.scrollTop = Math.min(scroller.scrollTop + step, scroller.scrollHeight);
   }
-  anchor.scrollIntoView({ block: "end", behavior: "instant" });
+  // scrollIntoView on a row also scrolls every ancestor and desyncs Suno's
+  // virtualized library, which clips page 1. Move only the list scroller.
   if (Math.abs(scroller.scrollTop - before) < 2) {
     window.scrollBy(0, Math.floor(window.innerHeight * 0.85));
   }
 }
 
 function scrollLibraryUp() {
-  const buttons = getRowButtons();
-  const anchor = buttons[0];
   const scroller = libraryScroller();
   const before = scroller.scrollTop;
   const step = Math.max(120, Math.floor(scroller.clientHeight * 0.75));
   scroller.scrollTop = Math.max(0, scroller.scrollTop - step);
-  if (anchor) anchor.scrollIntoView({ block: "start", behavior: "instant" });
   if (Math.abs(scroller.scrollTop - before) < 2) {
     window.scrollBy(0, -Math.floor(window.innerHeight * 0.85));
   }
@@ -256,12 +272,12 @@ function scrollLibraryUp() {
 async function scrollLibraryToTop() {
   const scroller = libraryScroller();
   for (let i = 0; i < 20; i++) {
-    scroller.scrollTop = 0;
+    if (scroller && scroller !== document.body && scroller !== document.documentElement) {
+      scroller.scrollTop = 0;
+    }
     window.scrollTo(0, 0);
-    const first = getRowButtons()[0];
-    if (first) first.scrollIntoView({ block: "start", behavior: "instant" });
     await sleep(80);
-    if (scroller.scrollTop <= 2) break;
+    if (!scroller || scroller.scrollTop <= 2) break;
   }
   await sleep(200);
 }
@@ -349,11 +365,7 @@ function focusLibraryScroller() {
     try {
       scroller.focus({ preventScroll: true });
     } catch (_) {
-      try {
-        scroller.focus();
-      } catch (_) {
-        /* ignore */
-      }
+      /* A focus without preventScroll scrolls the virtualized list and clips page 1. */
     }
   }
   if (document.activeElement !== scroller) blurRowPlaybackFocus();
@@ -1182,36 +1194,290 @@ function findCoverImage(track) {
   return matches.length ? matches[0].img : null;
 }
 
-// Song lyrics are the multi-line pre-wrap block in the open details panel, next
-// to the "Image for <title>" cover. The library filter tab named Lyrics is not
-// that text. The panel has to be showing this song before the text can be read.
-function findLyricsText(track) {
-  if (typeof normalizeLyrics !== "function") return "";
-  const title = String(track.title || "").trim();
-  if (!title) return "";
-  const anchors = Array.from(document.images).filter((img) => {
-    const altTitle = typeof coverAltTitle === "function" ? coverAltTitle(img.alt || "") : "";
-    return /^image for /i.test(img.alt || "") && altTitle && titleKey(altTitle) === titleKey(title) && isShown(img);
-  });
-  for (const img of anchors) {
-    let node = img.parentElement;
-    for (let depth = 0; depth < 12 && node && node !== document.body; depth += 1) {
-      if (node.querySelector && node.querySelector('[aria-label*="Playbar: Title"]')) break;
-      const blocks = Array.from(node.querySelectorAll("div, p, pre")).filter((el) => {
-        if (!isShown(el) || el.children.length > 3) return false;
-        const whiteSpace = getComputedStyle(el).whiteSpace;
-        if (whiteSpace !== "pre-wrap" && whiteSpace !== "pre-line") return false;
-        const lines = (el.innerText || "").split(/\n/).filter((line) => line.trim()).length;
-        return lines >= 2;
-      });
-      if (blocks.length) {
-        blocks.sort((a, b) => (b.innerText || "").length - (a.innerText || "").length);
-        const lyrics = normalizeLyrics(blocks[0].innerText);
-        if (lyrics) return lyrics;
-      }
-      node = node.parentElement;
+function queryDeepAll(root, selector) {
+  const out = [];
+  const seen = new Set();
+  const visit = (node) => {
+    if (!node || seen.has(node) || typeof node.querySelectorAll !== "function") return;
+    seen.add(node);
+    for (const el of node.querySelectorAll(selector)) out.push(el);
+    for (const el of node.querySelectorAll("*")) {
+      if (el.shadowRoot) visit(el.shadowRoot);
     }
+  };
+  visit(root);
+  return out;
+}
+
+function elementContainsLibraryList(node) {
+  if (!node || typeof node.querySelectorAll !== "function") return false;
+  let plays = 0;
+  for (const btn of node.querySelectorAll("button[aria-label]")) {
+    if (!parseRowLabel(btn.getAttribute("aria-label") || "")) continue;
+    plays += 1;
+    if (plays >= 2) return true;
   }
+  return false;
+}
+
+function isLibraryLyricsControl(el) {
+  if (!el || typeof el.closest !== "function") return false;
+  if (el.closest("button, [role='tab'], [role='tablist']")) return true;
+  const role = typeof el.getAttribute === "function" ? el.getAttribute("role") : "";
+  return role === "tab" || role === "button";
+}
+
+// The open song panel is the largest ancestor of its "Image for <title>" cover
+// that still does not contain the library list or the play bar.
+function songPanelRoot(title) {
+  const wanted = titleKey(title);
+  if (!wanted) return null;
+  const imgs = queryDeepAll(document, "img").filter((img) => {
+    const alt = img.alt || "";
+    if (!/^image for /i.test(alt)) return false;
+    const altTitle = typeof coverAltTitle === "function" ? coverAltTitle(alt) : "";
+    return Boolean(altTitle) && titleKey(altTitle) === wanted;
+  });
+  imgs.sort((a, b) => Number(isShown(b)) - Number(isShown(a)));
+  const img = imgs[0];
+  if (!img) return null;
+  let node = img.parentElement;
+  let best = node;
+  for (let depth = 0; depth < 16 && node && node !== document.body && node !== document.documentElement; depth += 1) {
+    if (node.querySelector && node.querySelector('[aria-label*="Playbar: Title"]')) break;
+    if (elementContainsLibraryList(node)) break;
+    best = node;
+    const role = typeof node.getAttribute === "function" ? node.getAttribute("role") : "";
+    if (role === "dialog" || node.tagName === "DIALOG") break;
+    node = node.parentElement;
+  }
+  return best;
+}
+
+function preservedLyricSpace(el) {
+  try {
+    const whiteSpace = getComputedStyle(el).whiteSpace;
+    return whiteSpace === "pre" || whiteSpace === "pre-wrap" || whiteSpace === "pre-line";
+  } catch (_) {
+    return false;
+  }
+}
+
+function lyricCandidateElements(panel) {
+  if (!panel) return [];
+  return queryDeepAll(panel, "div, p, pre").filter((el) => {
+    if (isLibraryLyricsControl(el)) return false;
+    if (el.querySelector && el.querySelector("button, [role='tab'], input, textarea")) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 8 || rect.height < 8) return false;
+    let style;
+    try {
+      style = getComputedStyle(el);
+    } catch (_) {
+      return false;
+    }
+    if (!style || style.display === "none" || style.visibility === "hidden") return false;
+    if (!preservedLyricSpace(el)) return false;
+    const text = (el.innerText || "").trim();
+    if (!text) return false;
+    const lines = text.split(/\n/).filter((line) => line.trim()).length;
+    if (lines >= 2 || text.length >= 12) return true;
+    return typeof lyricsPresence === "function" && lyricsPresence(text) === "absent";
+  });
+}
+
+function elementNearLyricsHeading(el) {
+  let node = el;
+  for (let depth = 0; depth < 5 && node; depth += 1) {
+    const previous = node.previousElementSibling;
+    if (previous) {
+      const label = (previous.innerText || "").replace(/\s+/g, " ").trim();
+      if (/^lyrics$/i.test(label)) return true;
+    }
+    node = node.parentElement;
+  }
+  return false;
+}
+
+// Inherited pre-wrap makes every ancestor look like the lyric block. Keep the
+// longest block, and skip a wrapper whose child already holds almost all of it.
+// A block sitting under a Lyrics heading wins over a longer style prompt.
+function chooseLyricElement(candidates) {
+  const labeled = candidates.filter(elementNearLyricsHeading);
+  const pool = labeled.length ? labeled : candidates;
+  const ranked = pool.slice().sort((a, b) => (b.innerText || "").length - (a.innerText || "").length);
+  for (const el of ranked) {
+    const length = (el.innerText || "").trim().length;
+    const wrapper = pool.some((other) => {
+      if (other === el || typeof el.contains !== "function" || !el.contains(other)) return false;
+      const childLength = (other.innerText || "").trim().length;
+      return length > 0 && childLength / length >= 0.85;
+    });
+    if (!wrapper) return el;
+  }
+  return ranked[0] || null;
+}
+
+function readPanelLyrics(panel) {
+  const el = chooseLyricElement(lyricCandidateElements(panel));
+  if (!el) return { lyrics: "", absent: false };
+  const text = el.innerText || "";
+  const presence = typeof lyricsPresence === "function" ? lyricsPresence(text) : "";
+  if (presence === "lyrics" && typeof normalizeLyrics === "function") {
+    const lyrics = normalizeLyrics(text);
+    return lyrics ? { lyrics, absent: false } : { lyrics: "", absent: false };
+  }
+  if (presence === "absent") return { lyrics: "", absent: true };
+  if (presence !== "lyrics" && typeof normalizeLyrics === "function") {
+    const lyrics = normalizeLyrics(text);
+    if (lyrics) return { lyrics, absent: false };
+  }
+  return { lyrics: "", absent: false };
+}
+
+function libraryScrollRoot() {
+  const scroller = libraryScroller();
+  if (!scroller || scroller === document.body || scroller === document.documentElement) return null;
+  return scroller;
+}
+
+function libraryScrollOffset() {
+  const library = libraryScrollRoot();
+  return {
+    library,
+    top: library ? library.scrollTop : 0,
+    windowY: window.scrollY || 0,
+  };
+}
+
+function restoreLibraryOffset(saved) {
+  if (!saved) return;
+  if (saved.library && saved.library.scrollTop !== saved.top) saved.library.scrollTop = saved.top;
+  if ((window.scrollY || 0) !== saved.windowY) window.scrollTo(0, saved.windowY);
+}
+
+function isLibraryScrollSurface(el) {
+  if (!el) return false;
+  if (el === document.body || el === document.documentElement || el === document.scrollingElement) return true;
+  const library = libraryScrollRoot();
+  if (library && (el === library || library.contains(el) || el.contains(library))) return true;
+  return elementContainsLibraryList(el);
+}
+
+function panelScrollContainers(panel) {
+  if (!panel) return [];
+  const nodes = [panel, ...queryDeepAll(panel, "div, section, article, aside")];
+  return nodes.filter((el) => {
+    if (!el || isLibraryScrollSurface(el) || el.scrollHeight <= el.clientHeight + 16) return false;
+    try {
+      const style = getComputedStyle(el);
+      return /auto|scroll|overlay/.test(`${style.overflowY} ${style.overflow}`);
+    } catch (_) {
+      return false;
+    }
+  });
+}
+
+function scrollersAtEnd(scrollers) {
+  return scrollers.every((el) => el.scrollTop + el.clientHeight >= el.scrollHeight - 4);
+}
+
+function nudgePanelScroll(scrollers) {
+  let moved = false;
+  for (const el of scrollers) {
+    const max = el.scrollHeight - el.clientHeight;
+    if (el.scrollTop >= max - 2) continue;
+    const next = Math.min(max, el.scrollTop + Math.max(160, Math.floor(el.clientHeight * 0.75)));
+    if (next === el.scrollTop) continue;
+    el.scrollTop = next;
+    moved = true;
+  }
+  return moved;
+}
+
+function panelLooksLoading(panel) {
+  if (!panel) return false;
+  if (typeof panel.getAttribute === "function" && panel.getAttribute("aria-busy") === "true") return true;
+  return queryDeepAll(panel, "[aria-busy='true'], [role='progressbar']").some((el) => {
+    const rect = el.getBoundingClientRect();
+    return rect.width > 1 && rect.height > 1;
+  });
+}
+
+function panelContentSignature(panel, scrollers) {
+  const raw = panel && panel.innerText ? panel.innerText : "";
+  const stableText = raw.replace(/\d+:\d{2}/g, "").replace(/\d+(?:\.\d+)?%/g, "");
+  const heights = scrollers.map((el) => el.scrollHeight).join(",");
+  return `${stableText.length}:${heights}`;
+}
+
+// Song lyrics are the pre-wrap block in the open details panel, next to the
+// "Image for <title>" cover. The library filter tab named Lyrics is not that
+// text. Visible lyrics are returned immediately. An empty panel is watched for
+// 4 seconds of unchanged content, scrolling only inside the song panel.
+async function waitForLyricsText(track, log) {
+  const library = libraryScrollRoot();
+  if (library) library.scrollTop = 0;
+  window.scrollTo(0, 0);
+  const libraryAtStart = libraryScrollOffset();
+  let stableSince = 0;
+  let lastSignature = "";
+  let announcedWait = false;
+  let announcedScroll = false;
+  let resetPanelScroll = false;
+  while (!stopRequested) {
+    const panel = songPanelRoot(track.title);
+    if (!panel) {
+      if (!stableSince) stableSince = Date.now();
+      else if (Date.now() - stableSince >= LYRICS_ABSENT_STABLE_MS) {
+        restoreLibraryOffset(libraryAtStart);
+        return "";
+      }
+      await sleep(LYRICS_POLL_MS);
+      continue;
+    }
+    const reading = readPanelLyrics(panel);
+      if (reading.lyrics) {
+        restoreLibraryOffset(libraryAtStart);
+        return reading.lyrics;
+      }
+      const scrollers = panelScrollContainers(panel);
+      if (!resetPanelScroll) {
+        for (const el of scrollers) el.scrollTop = 0;
+        restoreLibraryOffset(libraryAtStart);
+        resetPanelScroll = true;
+      }
+      if (!announcedWait) {
+        log(`  waiting for lyrics in "${track.title}"`);
+        announcedWait = true;
+      }
+      const atEnd = scrollersAtEnd(scrollers);
+      if (!atEnd) {
+        if (!announcedScroll) {
+          log("  scrolling the song panel for lyrics");
+          announcedScroll = true;
+        }
+        nudgePanelScroll(scrollers);
+        restoreLibraryOffset(libraryAtStart);
+      }
+      const again = readPanelLyrics(panel);
+      if (again.lyrics) {
+        restoreLibraryOffset(libraryAtStart);
+        return again.lyrics;
+      }
+      const signature = panelContentSignature(panel, scrollers);
+      const loading = panelLooksLoading(panel);
+      if (loading || !lastSignature || signature !== lastSignature) {
+        stableSince = loading ? 0 : Date.now();
+        lastSignature = loading ? "" : signature;
+      } else if (Date.now() - stableSince >= LYRICS_ABSENT_STABLE_MS) {
+        const finalRead = readPanelLyrics(panel);
+        restoreLibraryOffset(libraryAtStart);
+        return finalRead.lyrics || "";
+      }
+    await sleep(LYRICS_POLL_MS);
+  }
+  restoreLibraryOffset(libraryAtStart);
   return "";
 }
 
@@ -1223,7 +1489,8 @@ function coverFetchUrl(src) {
 }
 
 async function saveLyricsFile(track, filename, log) {
-  const lyrics = findLyricsText(track);
+  const lyrics = await waitForLyricsText(track, log);
+  if (stopRequested) return false;
   if (!lyrics) {
     log(`  no lyrics for "${track.title}" — skipped text file`);
     return false;
@@ -1304,7 +1571,7 @@ function titleClickTarget(row, title) {
   return candidates.length ? candidates[0].el : null;
 }
 
-function clickElement(el, scroll) {
+function clickElement(el) {
   if (!el || isRowPlayButton(el) || insidePlayControl(el)) return;
   const link = typeof el.closest === "function" ? el.closest("a[href]") : null;
   const guard = (event) => {
@@ -1312,14 +1579,7 @@ function clickElement(el, scroll) {
   };
   if (link) document.addEventListener("click", guard, true);
   try {
-    if (scroll) {
-      try {
-        el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-      } catch (_) {
-        /* ignore */
-      }
-    }
-    // One click. A synthetic click plus el.click() toggles Play on, then off.
+    // Do not scrollIntoView. That scrolls the virtualized library and clips page 1.
     el.click();
   } finally {
     if (link) document.removeEventListener("click", guard, true);
@@ -1328,31 +1588,34 @@ function clickElement(el, scroll) {
 
 async function waitForSongPanel(title, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (stopRequested) return false;
+  while (!stopRequested && Date.now() < deadline) {
     if (panelShowsTitle(title)) return true;
     await sleep(200);
   }
-  return panelShowsTitle(title);
+  return !stopRequested && panelShowsTitle(title);
 }
 
 async function findButtonForPanel(title, log) {
-  if (findVisibleButtonByTitle(title)) return findVisibleButtonByTitle(title);
+  const visible = findVisibleButtonByTitle(title);
+  if (visible) return visible;
+  const library = libraryScrollRoot();
+  if (!library || stopRequested) return null;
   log(`  looking for "${title}" to open its panel`);
-  const want = () => Boolean(findVisibleButtonByTitle(title));
-  const harvest = (map) => {
-    for (const row of collectVisibleRows()) {
-      if (row.key && !map.has(row.key)) map.set(row.key, row.title);
-    }
-  };
-  const seen = new Map();
-  harvest(seen);
-  const up = await scrollHarvesting("up", seen, harvest, log, want);
-  if (up.found || up.stopped || stopRequested) return findVisibleButtonByTitle(title);
-  const downSeen = new Map();
-  harvest(downSeen);
-  await scrollHarvesting("down", downSeen, harvest, log, want);
-  return findVisibleButtonByTitle(title);
+  const fold = foldTitleKey(title);
+  const max = Math.max(0, library.scrollHeight - library.clientHeight);
+  const remembered = sidecarListOffset.get(fold);
+  const origin = typeof remembered === "number" ? Math.min(max, Math.max(0, remembered)) : library.scrollTop;
+  const step = Math.max(180, Math.floor((library.clientHeight || 480) * 0.75));
+  const tops = [origin];
+  for (let i = 1; i <= 3; i += 1) tops.push(origin + step * i, origin - step * i);
+  for (const top of tops) {
+    if (stopRequested) return null;
+    library.scrollTop = Math.min(max, Math.max(0, top));
+    await sleep(160);
+    const found = findVisibleButtonByTitle(title);
+    if (found) return found;
+  }
+  return null;
 }
 
 function playbarTitleElement() {
@@ -1377,26 +1640,41 @@ async function openSongPanel(title, log, opts) {
   const allowLibraryScroll = !opts || opts.allowLibraryScroll !== false;
   const button = allowLibraryScroll ? await findButtonForPanel(title, log) : findVisibleButtonByTitle(title);
   if (stopRequested) return false;
+  let clicked = false;
   if (button) {
     const row = panelRow(button);
     const target = titleClickTarget(row, title);
     if (target) {
       log(`  opening song panel for "${title}"`);
-      clickElement(target, allowLibraryScroll);
-      if (await waitForSongPanel(title, 5000)) return true;
+      clickElement(target);
+      clicked = true;
     }
   }
-  if (!allowLibraryScroll) {
+  if (!clicked && !allowLibraryScroll) {
     const bar = readPlaybarTrack();
     const el = playbarTitleElement();
     if (bar.title && titleKey(bar.title) === titleKey(title) && el) {
       log(`  opening song panel from the play bar for "${title}"`);
-      clickElement(el, false);
-      if (await waitForSongPanel(title, 5000)) return true;
+      clickElement(el);
+      clicked = true;
     }
   }
-  log(`  song panel did not show "${title}"`);
-  return false;
+  if (!clicked) {
+    log(`  song panel did not show "${title}"`);
+    return false;
+  }
+  const opened = await waitForSongPanel(title, 6000);
+  if (!opened) log(`  song panel did not show "${title}"`);
+  return opened;
+}
+
+async function ensureSongPanel(title, log, opts) {
+  for (let attempt = 0; attempt < 2 && !stopRequested; attempt += 1) {
+    if (panelShowsTitle(title)) return true;
+    const opened = await openSongPanel(title, log, opts);
+    if (opened) return true;
+  }
+  return !stopRequested && panelShowsTitle(title);
 }
 
 function playbackSnapshot() {
@@ -1437,19 +1715,53 @@ async function restorePlayback(snapshot, log, allowLibraryScroll) {
   }
 }
 
+async function resolveSidecarPlan(filename, log, opts) {
+  if (opts && opts.plan) return opts.plan;
+  try {
+    const options = await getOptions();
+    const files = await fetchSavedSidecars(options.saveFolder);
+    return typeof planSidecarSave === "function"
+      ? planSidecarSave(files, filename)
+      : { saveLyrics: true, saveCover: true, skipSong: false };
+  } catch (err) {
+    log(
+      `  ! could not check saved lyrics and covers, so nothing was downloaded: ${
+        err && err.message ? err.message : err
+      }`
+    );
+    return null;
+  }
+}
+
 async function saveLyricsAndCover(track, filename, log, coverSrc, opts) {
+  const plan = await resolveSidecarPlan(filename, log, opts);
+  if (!plan) return;
+  const saveLyrics = Boolean(plan.saveLyrics);
+  const saveCover = Boolean(plan.saveCover);
+  if (!saveLyrics && !saveCover) {
+    log(`  lyrics and cover already saved for "${track.title}"`);
+    return;
+  }
+
   const allowLibraryScroll = !opts || opts.allowLibraryScroll !== false;
   const snapshot = playbackSnapshot();
+  const needPanel = saveLyrics || (saveCover && !coverSrc);
   try {
-    if (!panelShowsTitle(track.title)) {
-      await openSongPanel(track.title, log, { allowLibraryScroll });
+    if (needPanel && !panelShowsTitle(track.title)) {
+      const opened = await ensureSongPanel(track.title, log, { allowLibraryScroll });
+      if (!opened || stopRequested) return;
     }
     if (stopRequested) return;
-    try {
-      await saveLyricsFile(track, filename, log);
-    } catch (err) {
-      log(`  ! lyrics save failed: ${err && err.message ? err.message : err}`);
+    if (saveLyrics && !saveCover) log("  cover already saved");
+    if (!saveLyrics && saveCover) log("  lyrics already saved");
+    if (saveLyrics) {
+      try {
+        await saveLyricsFile(track, filename, log);
+      } catch (err) {
+        log(`  ! lyrics save failed: ${err && err.message ? err.message : err}`);
+      }
     }
+    if (stopRequested || !saveCover) return;
 
     const image = findCoverImage(track);
     const src = (image ? image.currentSrc || image.src : "") || coverSrc || "";
@@ -1463,7 +1775,7 @@ async function saveLyricsAndCover(track, filename, log, coverSrc, opts) {
       log(`  ! cover save failed: ${err && err.message ? err.message : err}`);
     }
   } finally {
-    await restorePlayback(snapshot, log, allowLibraryScroll);
+    if (needPanel) await restorePlayback(snapshot, log, allowLibraryScroll);
   }
 }
 
@@ -1487,14 +1799,19 @@ function coverSrcInRow(button, title) {
   return matched ? matched.currentSrc || matched.src : "";
 }
 
+const sidecarListOffset = new Map();
+
 function foldTitleKey(title) {
   return titleKey(title).toLowerCase();
 }
 
 function harvestVisibleSidecars(intoMap) {
+  const library = libraryScrollRoot();
+  const offset = library ? library.scrollTop : 0;
   for (const row of collectVisibleRows()) {
     const fold = foldTitleKey(row.title);
     if (!fold) continue;
+    if (!sidecarListOffset.has(fold)) sidecarListOffset.set(fold, offset);
     const coverSrc = coverSrcInRow(row.button, row.title);
     const previous = intoMap.get(fold);
     if (!previous) {
@@ -1506,6 +1823,7 @@ function harvestVisibleSidecars(intoMap) {
 }
 
 async function discoverSidecars(log) {
+  sidecarListOffset.clear();
   const scan = await scanLibraryFromTop(log, (map) => harvestVisibleSidecars(map));
   const discovered = scan.discovered;
   for (const [fold, item] of scan.upward) {
@@ -1518,6 +1836,7 @@ async function discoverSidecars(log) {
 }
 
 async function runLyricsAndCovers(log) {
+  try {
   if (!location.pathname.startsWith("/me")) {
     log("Open suno.com/me — lyrics and covers are read from your library.");
     await setState({ status: "idle", failedAt: Date.now(), mode: "meta" });
@@ -1544,8 +1863,21 @@ async function runLyricsAndCovers(log) {
     log(`Limiting to the first ${items.length} of ${discoveredTotal} tracks (Options → Max tracks).`);
   }
 
-  // The recorded-song list means a WAV was saved. This pass still writes lyrics
-  // and covers for those titles. Duplicate names inside this run are saved once.
+  let sidecarFiles = null;
+  try {
+    sidecarFiles = await fetchSavedSidecars(options.saveFolder);
+    log(`Checking saved lyrics and covers in "${options.saveFolder}".`);
+  } catch (err) {
+    log(`  ! could not check saved lyrics and covers: ${err && err.message ? err.message : err}`);
+    log("Lyrics and covers stopped without downloading, so existing files are left alone.");
+    await setState({ status: "idle", failedAt: Date.now(), mode: "meta" });
+    return;
+  }
+
+  // A WAV on the recorded-song list is not lyrics or a cover. Skip a song only
+  // when its lyric file and cover file are already in the save folder. A cover
+  // without a lyric file still opens the panel. Duplicate names in this run
+  // are handled once.
   const seen = new Set();
   const results = [];
   const startedAt = Date.now();
@@ -1572,6 +1904,17 @@ async function runLyricsAndCovers(log) {
     }
     seen.add(fold);
 
+    const filename = buildRelativePath(options.saveFolder, options.filenamePrefix || "", item.title);
+    const plan =
+      typeof planSidecarSave === "function"
+        ? planSidecarSave(sidecarFiles, filename)
+        : { skipSong: false, saveLyrics: true, saveCover: true, hasLyrics: false, hasCover: false };
+    if (plan.skipSong) {
+      log(`Skipping (lyrics and cover already saved): ${item.title}`);
+      results.push({ title: item.title, done: true, failed: false, skipped: true });
+      continue;
+    }
+
     log(`Lyrics and cover (${results.length + 1}/${items.length}): ${item.title}`);
     await setState({
       status: "capturing",
@@ -1583,10 +1926,10 @@ async function runLyricsAndCovers(log) {
       startedAt,
     });
 
-    const filename = buildRelativePath(options.saveFolder, options.filenamePrefix || "", item.title);
     try {
       await saveLyricsAndCover({ title: item.title, id: "" }, filename, log, item.coverSrc, {
         allowLibraryScroll: true,
+        plan,
       });
       results.push({ title: item.title, done: true, failed: false });
     } catch (err) {
@@ -1605,6 +1948,15 @@ async function runLyricsAndCovers(log) {
   const saved = results.filter((entry) => entry.done && !entry.failed && !entry.skipped).length;
   const skipped = results.filter((entry) => entry.skipped).length;
   log(`Lyrics and covers finished — ${saved} saved, ${skipped} skipped, ${discoveredTotal} found.`);
+  } finally {
+    if (location.pathname.startsWith("/me")) {
+      try {
+        await scrollLibraryToTop();
+      } catch (_) {
+        /* the list scroller may already be gone */
+      }
+    }
+  }
 }
 
 async function recordPlaybarTrack(track, log) {

@@ -323,6 +323,11 @@ async function handleMessage(message, sender) {
       return { ok: true, titles };
     }
 
+    case "listSavedSidecars": {
+      const files = await searchSavedSidecars(message.saveFolder);
+      return { ok: true, files };
+    }
+
     default: {
       return { ok: false, error: `Unknown message type: ${message.type}` };
     }
@@ -570,6 +575,35 @@ async function searchCapturedTitles(saveFolder) {
     if (!/\.(wav|webm|ogg|mp3|m4a)$/i.test(fn)) continue;
     if (folder && !fn.toLowerCase().includes(`/${folder}/`)) continue;
     out.push(fn);
+  }
+  return out;
+}
+
+// Completed lyric and cover downloads that are still on disk. Chrome's
+// "Title (1)" copies are included here; planSidecarSave ignores them and
+// matches only the original filename. exists === false means the file was
+// deleted and must not count as already saved.
+async function searchSavedSidecars(saveFolder) {
+  const folder = String(saveFolder || "Suno Recorder")
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+    .toLowerCase();
+
+  let items = [];
+  try {
+    items = await chrome.downloads.search({ state: "complete", limit: 0, orderBy: ["-startTime"] });
+  } catch (err) {
+    throw new Error(err && err.message ? err.message : "could not read download history");
+  }
+
+  const out = [];
+  for (const item of items) {
+    if (!item || item.exists === false) continue;
+    const filename = String(item.filename || "").replace(/\\/g, "/");
+    if (!/\.(txt|jpe?g|png|webp)$/i.test(filename)) continue;
+    if (folder && !filename.toLowerCase().includes(`/${folder}/`)) continue;
+    const bytes = typeof item.fileSize === "number" ? item.fileSize : -1;
+    out.push({ filename, bytes });
   }
   return out;
 }

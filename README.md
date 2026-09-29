@@ -25,4 +25,4 @@ Options: max tracks, filename prefix, **save folder**, skip done, **recorded son
 - Only this tab’s audio is recorded (not system sounds / other apps)
 - MediaRecorder captures WebM/Opus internally; converted to WAV before save
 - Files save to `Downloads/<save folder>/<prefix><title>.wav`, plus `.txt` lyrics when that song's panel shows them and a `.jpg`, `.png`, or `.webp` cover. Lyrics and covers opens each song's panel before saving.
-- Version: see `manifest.json` (currently **1.5.6**)
+- Version: see `manifest.json` (currently **1.5.8**)

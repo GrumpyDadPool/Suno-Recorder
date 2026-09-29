@@ -60,6 +60,10 @@ function imageExtension(mime, src, bytes) {
   return "";
 }
 
+const NO_LYRICS_TEXT =
+  /^(instrumental|no lyrics available|no lyrics|this song is instrumental|lyrics unavailable)\.?$/i;
+const COVER_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp"]);
+
 function normalizeLyrics(text) {
   const lines = String(text || "")
     .replace(/\u00a0/g, " ")
@@ -67,10 +71,63 @@ function normalizeLyrics(text) {
     .map((line) => line.replace(/[ \t]+$/g, ""));
   while (lines.length && !lines[0].trim()) lines.shift();
   while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  if (lines.length && /^lyrics$/i.test(lines[0].trim())) lines.shift();
+  while (lines.length && !lines[0].trim()) lines.shift();
   const value = lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   if (!value) return "";
-  if (/^(instrumental|no lyrics available|no lyrics)\.?$/i.test(value)) return "";
+  if (NO_LYRICS_TEXT.test(value.replace(/\s+/g, " ").trim())) return "";
   return value;
+}
+
+// "lyrics" is real song text. "absent" is a placeholder that says the song has
+// no lyrics. "empty" means this read did not show either one yet.
+function lyricsPresence(text) {
+  const compact = String(text || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!compact || /^lyrics$/i.test(compact)) return "empty";
+  if (normalizeLyrics(text)) return "lyrics";
+  const withoutLabel = compact.replace(/^lyrics\s+/i, "").trim();
+  if (NO_LYRICS_TEXT.test(compact) || NO_LYRICS_TEXT.test(withoutLabel)) return "absent";
+  return "empty";
+}
+
+// Decide what a Lyrics and covers run still needs to download. A Chrome
+// "Title (1)" uniquify name is not the saved song. An empty file is not saved
+// lyrics or a saved cover. Audio on the recorded-song list is not consulted.
+function planSidecarSave(files, relativeBase) {
+  const relative = String(relativeBase || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+    .toLowerCase();
+  let hasLyrics = false;
+  let hasCover = false;
+  if (relative) {
+    for (const file of Array.isArray(files) ? files : []) {
+      const full = String((file && file.filename) || "")
+        .replace(/\\/g, "/")
+        .toLowerCase();
+      const slash = full.lastIndexOf("/");
+      const base = slash >= 0 ? full.slice(slash + 1) : full;
+      const dot = base.lastIndexOf(".");
+      if (dot <= 0) continue;
+      const ext = base.slice(dot + 1);
+      const stemPath = `${slash >= 0 ? full.slice(0, slash + 1) : ""}${base.slice(0, dot)}`;
+      if (stemPath !== relative && !stemPath.endsWith(`/${relative}`)) continue;
+      const bytes = file && typeof file.bytes === "number" ? file.bytes : -1;
+      if (bytes === 0) continue;
+      if (ext === "txt") hasLyrics = true;
+      else if (COVER_EXTENSIONS.has(ext)) hasCover = true;
+    }
+  }
+  return {
+    hasLyrics,
+    hasCover,
+    skipSong: hasLyrics && hasCover,
+    saveLyrics: !hasLyrics,
+    saveCover: !hasCover,
+  };
 }
 
 if (typeof module !== "undefined") {
@@ -79,5 +136,7 @@ if (typeof module !== "undefined") {
     coverAltTitle,
     imageExtension,
     normalizeLyrics,
+    lyricsPresence,
+    planSidecarSave,
   };
 }
