@@ -7,7 +7,12 @@ const meterEl = document.getElementById("meter");
 const progressWrap = document.getElementById("progressWrap");
 const progressBar = document.getElementById("progressBar");
 const optionsLink = document.getElementById("optionsLink");
+const oneSongBtn = document.getElementById("oneSongBtn");
+const lyricsBtn = document.getElementById("lyricsBtn");
 
+const ONE_SONG_PROMPT = "Click the song so it shows on the bottom play bar.";
+// Arms tab capture only. The One song wait for a play-bar title is not covered
+// by this timer. Stop is the only way to cancel that wait.
 const START_TIMEOUT_MS = 20_000;
 const STALE_SESSION_MS = 2 * 60 * 1000;
 
@@ -31,6 +36,8 @@ function isSunoLibraryPath(pathname) {
 
 function setBusy(isBusy) {
   startBtn.disabled = isBusy;
+  oneSongBtn.disabled = isBusy;
+  lyricsBtn.disabled = isBusy;
   meterEl.classList.toggle("active", isBusy);
 }
 
@@ -52,11 +59,17 @@ function render(state, error, lastLog) {
       progressBar.style.width = "0%";
     }
   } else if (state.status === "starting") {
-    statusEl.textContent = "Starting capture…";
+    statusEl.textContent = state.mode === "one"
+      ? (state.prompt || ONE_SONG_PROMPT)
+      : "Starting capture…";
     progressWrap.hidden = false;
     progressBar.style.width = "4%";
   } else if (state.status === "collecting") {
-    statusEl.textContent = "Scanning library…";
+    statusEl.textContent = state.mode === "one"
+      ? (state.prompt || ONE_SONG_PROMPT)
+      : state.mode === "meta"
+        ? "Reading lyrics and covers…"
+        : "Scanning library…";
     progressWrap.hidden = false;
     progressBar.style.width = "8%";
   } else if (state.status === "capturing") {
@@ -64,9 +77,10 @@ function render(state, error, lastLog) {
     const done = (state.queue || []).filter((t) => t.done).length;
     const current = state.queue && state.queue[state.currentIndex];
     const label = state.currentTitle || (typeof current === "string" ? current : current && current.title);
+    const action = state.mode === "meta" ? "Lyrics and covers" : "Recording";
     statusEl.textContent = total
-      ? `Recording ${Math.min(done + 1, total)} / ${total}${label ? ` · ${label}` : ""}`
-      : `Recording${label ? ` · ${label}` : ""}`;
+      ? `${action} ${Math.min(done + 1, total)} / ${total}${label ? ` · ${label}` : ""}`
+      : `${action}${label ? ` · ${label}` : ""}`;
     progressWrap.hidden = false;
     const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 12;
     progressBar.style.width = `${Math.max(pct, 10)}%`;
@@ -123,13 +137,13 @@ async function ensureContentScript(tabId) {
   }
   await chrome.scripting.executeScript({
     target: { tabId },
-    files: ["title_utils.js", "content.js"],
+    files: ["title_utils.js", "recorded_log.js", "sidecar_utils.js", "content.js"],
   });
 }
 
-startBtn.addEventListener("click", async () => {
+async function beginSession(mode) {
   errorEl.textContent = "";
-  statusEl.textContent = "Starting capture…";
+  statusEl.textContent = mode === "one" ? ONE_SONG_PROMPT : "Starting capture…";
   setBusy(true);
 
   try {
@@ -139,7 +153,11 @@ startBtn.addEventListener("click", async () => {
     }
     const parsed = parseSunoTabUrl(tab.url || "");
     if (!parsed) {
-      throw new Error("Open suno.com/me in this tab first, then click Start recording.");
+      throw new Error(
+        mode === "one"
+          ? "Open suno.com, click One song, then click the song so it shows on the bottom play bar."
+          : "Open suno.com/me in this tab first, then click Start recording."
+      );
     }
 
     await chrome.storage.local.remove(["sunoCaptureError", "sunoCaptureLastLog"]);
@@ -155,7 +173,14 @@ startBtn.addEventListener("click", async () => {
     }
 
     await chrome.storage.local.set({
-      sunoCaptureState: { status: "starting", queue: [], currentIndex: 0, startedAt: Date.now() },
+      sunoCaptureState: {
+        status: "starting",
+        queue: [],
+        currentIndex: 0,
+        startedAt: Date.now(),
+        mode,
+        prompt: mode === "one" ? ONE_SONG_PROMPT : "",
+      },
     });
 
     const response = await withTimeout(
@@ -165,17 +190,16 @@ startBtn.addEventListener("click", async () => {
         tabId: tab.id,
       }),
       START_TIMEOUT_MS,
-      "Timed out starting tab audio capture. Reload the extension, refresh suno.com/me, and try again."
+      "Timed out starting tab audio capture. Reload the extension, refresh the Suno tab, and try again."
     );
 
     if (!response || !response.ok) {
       throw new Error(response && response.error ? response.error : "unknown error starting session");
     }
 
-    // Make sure the library scraper is alive (reload extension ≠ refresh page).
-    if (isSunoLibraryPath(parsed.pathname)) {
-      await ensureContentScript(tab.id);
-    }
+    // Make sure the page script is alive (reload extension ≠ refresh page).
+    // One song stays on this page so the bottom play bar can update here.
+    await ensureContentScript(tab.id);
 
     await chrome.storage.local.set({
       sunoCaptureState: {
@@ -183,15 +207,29 @@ startBtn.addEventListener("click", async () => {
         queue: [],
         currentIndex: 0,
         startedAt: Date.now(),
+        mode,
+        prompt: mode === "one" ? ONE_SONG_PROMPT : "",
       },
     });
 
-    if (!isSunoLibraryPath(parsed.pathname)) {
+    if (mode !== "one" && !isSunoLibraryPath(parsed.pathname)) {
       await chrome.tabs.update(tab.id, { url: "https://suno.com/me" });
     }
 
-    statusEl.textContent = "Scanning library…";
+    statusEl.textContent = mode === "one" ? ONE_SONG_PROMPT : "Scanning library…";
   } catch (err) {
+    let current = null;
+    try {
+      const stored = await chrome.storage.local.get("sunoCaptureState");
+      current = stored.sunoCaptureState || null;
+    } catch (_) {
+      current = null;
+    }
+    // Capture already armed and the content script owns the wait. A late
+    // startup timeout must not idle the session or close the stream.
+    if (current && (current.status === "collecting" || current.status === "capturing")) {
+      return;
+    }
     const message = err && err.message ? err.message : String(err);
     errorEl.textContent = message;
     statusEl.textContent = "Ready";
@@ -206,7 +244,54 @@ startBtn.addEventListener("click", async () => {
       /* ignore */
     }
   }
-});
+}
+
+async function beginLyricsAndCovers() {
+  errorEl.textContent = "";
+  statusEl.textContent = "Reading lyrics and covers…";
+  setBusy(true);
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.id) throw new Error("Couldn't find the active tab.");
+    const parsed = parseSunoTabUrl(tab.url || "");
+    if (!parsed || !isSunoLibraryPath(parsed.pathname)) {
+      throw new Error("Open suno.com/me, then click Lyrics and covers.");
+    }
+    await chrome.storage.local.remove(["sunoCaptureError", "sunoCaptureLastLog"]);
+    await chrome.storage.local.set({
+      sunoCaptureState: { status: "idle", resetAt: Date.now() },
+    });
+    try {
+      await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+    } catch (_) {
+      /* no audio session to close */
+    }
+    await ensureContentScript(tab.id);
+    await chrome.storage.local.set({
+      sunoCaptureState: {
+        status: "collecting",
+        queue: [],
+        currentIndex: 0,
+        startedAt: Date.now(),
+        mode: "meta",
+      },
+    });
+    statusEl.textContent = "Reading lyrics and covers…";
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    errorEl.textContent = message;
+    statusEl.textContent = "Ready";
+    setBusy(false);
+    await chrome.storage.local.set({
+      sunoCaptureState: { status: "idle", failedAt: Date.now(), mode: "meta" },
+      sunoCaptureError: message,
+    });
+  }
+}
+
+startBtn.addEventListener("click", () => beginSession("library"));
+oneSongBtn.addEventListener("click", () => beginSession("one"));
+lyricsBtn.addEventListener("click", () => beginLyricsAndCovers());
 
 stopBtn.addEventListener("click", async () => {
   try {

@@ -11,6 +11,8 @@
 let persistentStream = null;
 let monitorContext = null;
 let monitorSource = null;
+let keepAliveContext = null;
+let keepAliveSource = null;
 let currentRecorder = null;
 let currentChunks = [];
 let iconTickTimer = null;
@@ -51,6 +53,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleMessage(message) {
   switch (message.type) {
+    case "ping":
+      return { ok: true };
     case "initStream":
       await initStream(message.streamId, Boolean(message.monitorAudio));
       return { ok: true };
@@ -90,6 +94,25 @@ function tearDownMonitor() {
   }
 }
 
+function tearDownKeepAlive() {
+  if (keepAliveSource) {
+    try {
+      keepAliveSource.disconnect();
+    } catch (_) {
+      /* ignore */
+    }
+    keepAliveSource = null;
+  }
+  if (keepAliveContext) {
+    try {
+      keepAliveContext.close();
+    } catch (_) {
+      /* ignore */
+    }
+    keepAliveContext = null;
+  }
+}
+
 async function initStream(streamId, monitorAudio) {
   stopIconTicks();
   if (persistentStream) {
@@ -97,6 +120,7 @@ async function initStream(streamId, monitorAudio) {
     persistentStream = null;
   }
   tearDownMonitor();
+  tearDownKeepAlive();
 
   persistentStream = await navigator.mediaDevices.getUserMedia({
     audio: {
@@ -112,11 +136,29 @@ async function initStream(streamId, monitorAudio) {
     throw new Error("Tab capture stream has no audio track");
   }
   audioTrack.onended = () => {
+    if (!currentRecorder || currentRecorder.state === "inactive") return;
     reportError(
       "The captured audio stream ended unexpectedly mid-track. If a track comes out " +
         "shorter than expected or empty, this is why."
     );
   };
+
+  // Hold the tab-capture track for the whole session. One song waits for a
+  // play-bar title before MediaRecorder starts; without a consumer, Chrome
+  // can drop a silent stream while that wait is still open.
+  keepAliveContext = new AudioContext();
+  keepAliveSource = keepAliveContext.createMediaStreamSource(persistentStream);
+  const keepAliveGain = keepAliveContext.createGain();
+  keepAliveGain.gain.value = 0;
+  keepAliveSource.connect(keepAliveGain);
+  keepAliveGain.connect(keepAliveContext.destination);
+  if (keepAliveContext.state === "suspended") {
+    try {
+      await keepAliveContext.resume();
+    } catch (_) {
+      /* a suspended silent sink still holds the track */
+    }
+  }
 
   // Optional speaker monitor — off by default so capture stays silent.
   // Note: Chrome routes tab audio into the capture stream; without a monitor

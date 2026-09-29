@@ -19,6 +19,12 @@ const scanBtn = document.getElementById("scanBtn");
 const scanClearBtn = document.getElementById("scanClearBtn");
 const scanFolderEl = document.getElementById("scanFolder");
 const scanMsg = document.getElementById("scanMsg");
+const recordedFilterEl = document.getElementById("recordedFilter");
+const recordedListEl = document.getElementById("recordedList");
+const recordedEmptyEl = document.getElementById("recordedEmpty");
+const recordedClearBtn = document.getElementById("recordedClearBtn");
+
+let recordedTitles = [];
 
 function renderScanned(count) {
   if (count > 0) {
@@ -30,6 +36,47 @@ function renderScanned(count) {
   }
 }
 
+function renderRecorded() {
+  const query = (recordedFilterEl.value || "").trim().toLowerCase();
+  const shown = recordedTitles
+    .slice()
+    .sort((a, b) => a.title.localeCompare(b.title))
+    .filter((item) => !query || item.title.toLowerCase().includes(query));
+
+  recordedListEl.replaceChildren();
+  recordedClearBtn.hidden = recordedTitles.length === 0;
+
+  if (!recordedTitles.length) {
+    recordedEmptyEl.textContent = "No songs recorded yet.";
+    return;
+  }
+  recordedEmptyEl.textContent = shown.length ? `${recordedTitles.length} recorded.` : "No titles match that filter.";
+
+  for (const item of shown) {
+    const row = document.createElement("li");
+    const name = document.createElement("span");
+    name.textContent = item.title;
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "linkish";
+    removeBtn.textContent = "Remove";
+    removeBtn.addEventListener("click", async () => {
+      await forgetRecordedTitle(item.title);
+      await refreshRecorded();
+    });
+    row.append(name, removeBtn);
+    recordedListEl.append(row);
+  }
+}
+
+async function refreshRecorded() {
+  const state = await loadRecordedState();
+  recordedTitles = (state.titles || [])
+    .map((entry) => normalizeRecordedEntry(entry))
+    .filter(Boolean);
+  renderRecorded();
+}
+
 async function load() {
   const stored = await chrome.storage.sync.get(DEFAULTS);
   maxTracksEl.value = stored.maxTracks ?? 0;
@@ -38,8 +85,12 @@ async function load() {
   skipCapturedEl.checked = stored.skipCaptured !== false;
   monitorAudioEl.checked = Boolean(stored.monitorAudio);
 
+  // Scan storage is only the last scan's count. Names were merged when the
+  // user chose the folder; do not seed from download history or merge again.
   const scan = await chrome.storage.local.get("sunoCaptureScannedTitles");
-  renderScanned((scan.sunoCaptureScannedTitles || []).length);
+  const scanned = scan.sunoCaptureScannedTitles || [];
+  renderScanned(scanned.length);
+  await refreshRecorded();
 }
 
 saveBtn.addEventListener("click", async () => {
@@ -68,6 +119,14 @@ async function persistScanned(titles) {
     sunoCaptureScannedAt: Date.now(),
   });
   renderScanned(titles.length);
+  // This explicit scan is the only merge. A removed title returns if the
+  // folder still has it. Opening Options later does not merge this list again.
+  const prefix = (filenamePrefixEl.value || "").trim();
+  await mergeIncomingRecordedTitles(
+    titles.map((name) => titleFromCapturedName(name, prefix)).filter(Boolean),
+    { overrideDismissed: true }
+  );
+  await refreshRecorded();
 }
 
 async function collectAudioNames(dirHandle, out, depth) {
@@ -120,8 +179,18 @@ scanFolderEl.addEventListener("change", async () => {
 });
 
 scanClearBtn.addEventListener("click", async () => {
+  // Clears the scan count only. Recorded songs stay as they are.
   await chrome.storage.local.remove(["sunoCaptureScannedTitles", "sunoCaptureScannedAt"]);
   renderScanned(0);
+});
+
+recordedFilterEl.addEventListener("input", () => {
+  renderRecorded();
+});
+
+recordedClearBtn.addEventListener("click", async () => {
+  await clearRecordedTitles();
+  await refreshRecorded();
 });
 
 load();

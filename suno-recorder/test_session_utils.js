@@ -29,6 +29,17 @@ assert.strictEqual(
   false
 );
 
+// One song waiting for a play-bar title. Empty queue, no recent heartbeat.
+assert.strictEqual(
+  isSessionStale(
+    { status: "collecting", mode: "one", startedAt: now - 10 * 60 * 1000, queue: [] },
+    now - 10 * 60 * 1000,
+    now,
+    STALE_MS
+  ),
+  false
+);
+
 // Content script actually died — no recent start or heartbeat.
 assert.strictEqual(
   isSessionStale(

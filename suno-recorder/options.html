@@ -38,7 +38,7 @@
   <div class="field">
     <label class="checkbox">
       <input id="skipCaptured" type="checkbox" checked>
-      <span>Skip titles already marked done in this browser (resume-friendly)</span>
+      <span>Skip songs on the recorded list below</span>
     </label>
   </div>
 
@@ -58,8 +58,21 @@
       <span id="scanMsg" class="scan-msg"></span>
     </div>
     <input id="scanFolder" type="file" webkitdirectory directory multiple hidden>
-    <div class="help">Reads the existing audio filenames in a folder so “skip already captured” can
-      skip them even across a fresh browser. Nothing leaves your machine — only filenames are read.</div>
+    <div class="help">Adds the folder’s audio filenames to Recorded songs once. That scan is not
+      imported again until you choose a folder again. Nothing leaves your machine — only filenames are read.</div>
+  </div>
+
+  <div class="field">
+    <label for="recordedFilter">Recorded songs</label>
+    <input id="recordedFilter" type="text" placeholder="Filter titles" autocomplete="off">
+    <div class="help">Library runs skip these titles. The list is stored in this browser.
+      Remove a title to record that song again. A folder scan adds names here once;
+      opening this page does not import them again.</div>
+    <ul id="recordedList" class="recorded-list"></ul>
+    <div id="recordedEmpty" class="recorded-empty"></div>
+    <div class="recorded-toolbar">
+      <button type="button" class="linkish" id="recordedClearBtn" hidden>Clear all</button>
+    </div>
   </div>
 
   <div class="save-row">
@@ -67,6 +80,8 @@
     <button type="button" class="btn-primary" id="saveBtn">Save</button>
   </div>
 
+  <script src="title_utils.js"></script>
+  <script src="recorded_log.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

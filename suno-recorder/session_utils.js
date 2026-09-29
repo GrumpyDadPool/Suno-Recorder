@@ -8,6 +8,10 @@ function isWatchdogStatus(status) {
 
 function isSessionStale(state, heartbeat, now, staleMs) {
   if (!state || !isWatchdogStatus(state.status)) return false;
+  // One song stays on "collecting" until a play-bar title shows up. That can
+  // be well over a minute, and an empty bar is not a stuck session. Stop is
+  // the only cancel for that wait.
+  if (state.mode === "one" && state.status === "collecting") return false;
   const startedAt = Number(state.startedAt) || 0;
   const lastBeat = Number(heartbeat) || 0;
   const lastAlive = Math.max(startedAt, lastBeat);

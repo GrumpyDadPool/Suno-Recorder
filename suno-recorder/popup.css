@@ -202,11 +202,16 @@ body.options {
 
 .actions {
   display: grid;
-  grid-template-columns: 1.4fr 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin-bottom: 12px;
   position: relative;
   z-index: 1;
+}
+
+.actions #startBtn,
+.actions #lyricsBtn {
+  grid-column: 1 / -1;
 }
 
 button {
@@ -407,6 +412,54 @@ button:disabled {
 
 .scan-msg {
   color: var(--mist);
+  font-size: 12px;
+}
+
+.recorded-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.recorded-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.recorded-list:empty {
+  display: none;
+}
+
+.recorded-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.recorded-list li:last-child {
+  border-bottom: 0;
+}
+
+.recorded-list li span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recorded-empty {
+  margin-top: 6px;
+  color: var(--fog);
   font-size: 12px;
 }
 
