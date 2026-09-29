@@ -18,6 +18,15 @@
 
 const OFFSCREEN_URL = "offscreen.html";
 const KEEPALIVE_ALARM = "suno-recorder-keepalive";
+const DEBUGGER_PROTOCOL = "1.3";
+// Trusted keys only. An untrusted KeyboardEvent cannot scroll the Suno library.
+const LIBRARY_KEYS = {
+  Home: { key: "Home", code: "Home", windowsVirtualKeyCode: 36, nativeVirtualKeyCode: 36 },
+  End: { key: "End", code: "End", windowsVirtualKeyCode: 35, nativeVirtualKeyCode: 35 },
+  PageUp: { key: "PageUp", code: "PageUp", windowsVirtualKeyCode: 33, nativeVirtualKeyCode: 33 },
+  PageDown: { key: "PageDown", code: "PageDown", windowsVirtualKeyCode: 34, nativeVirtualKeyCode: 34 },
+};
+let debuggerTabId = null;
 
 // --- Animated toolbar icon while a capture session is active ---------------
 // A toolbar action icon can't play a GIF, so we redraw it frame-by-frame via
@@ -217,20 +226,16 @@ async function handleMessage(message, sender) {
 
     case "saveRecording": {
       // Preferred path: the offscreen document hands us a blob: URL string it
-      // created, so no large payload crosses the message boundary. dataUrl/buffer
-      // are legacy fallbacks. Only revoke a URL WE create here — the offscreen
-      // document owns and revokes its own blob URL.
+      // created. A service worker cannot call URL.createObjectURL, so a legacy
+      // byte buffer becomes a data: URL instead of a blob URL.
       let url = message.objectUrl || message.dataUrl || null;
-      let ownedObjectUrl = null;
 
       if (!url && message.buffer) {
         const bytes = coerceToUint8Array(message.buffer);
         if (!bytes || !bytes.byteLength) {
           throw new Error("saveRecording received an empty audio buffer");
         }
-        const blob = new Blob([bytes], { type: message.mimeType || "audio/wav" });
-        ownedObjectUrl = URL.createObjectURL(blob);
-        url = ownedObjectUrl;
+        url = bytesToDataUrl(bytes, message.mimeType || "audio/wav");
       }
 
       if (!url) {
@@ -238,22 +243,16 @@ async function handleMessage(message, sender) {
       }
 
       const extension = (message.extension || "wav").replace(/^\./, "");
-      try {
-        const downloadId = await chrome.downloads.download({
-          url,
-          filename: `${message.filename}.${extension}`,
-          saveAs: false,
-          conflictAction: "uniquify",
-        });
-        if (downloadId === undefined) {
-          throw new Error("chrome.downloads.download returned no id");
-        }
-        await waitForDownloadSettle(downloadId, 45_000);
-      } finally {
-        if (ownedObjectUrl) {
-          setTimeout(() => URL.revokeObjectURL(ownedObjectUrl), 60_000);
-        }
+      const downloadId = await chrome.downloads.download({
+        url,
+        filename: `${message.filename}.${extension}`,
+        saveAs: false,
+        conflictAction: "uniquify",
+      });
+      if (downloadId === undefined) {
+        throw new Error("chrome.downloads.download returned no id");
       }
+      await waitForDownloadSettle(downloadId, 45_000);
       return { ok: true, extension };
     }
 
@@ -263,27 +262,32 @@ async function handleMessage(message, sender) {
         throw new Error(`Unsupported sidecar type: ${extension}`);
       }
       const filename = assertSafeRelativeFilename(message.filename);
-      let bytes = null;
-      let mime = "application/octet-stream";
       if (extension === "txt") {
         const text = String(message.text || "");
         if (!text.trim()) throw new Error("Refusing to write an empty lyrics file");
-        bytes = new TextEncoder().encode(text);
-        mime = "text/plain;charset=utf-8";
+        await downloadViaOffscreenBlob(
+          { text, mimeType: "text/plain;charset=utf-8" },
+          filename,
+          extension
+        );
       } else {
-        bytes = coerceToUint8Array(message.buffer);
+        const bytes = coerceToUint8Array(message.buffer);
         if (!bytes || !bytes.byteLength) throw new Error("Cover image was empty");
         if (bytes.byteLength > 8_000_000) throw new Error("Cover image is too large");
-        mime = message.mimeType || "application/octet-stream";
-      }
-      const blob = new Blob([bytes], { type: mime });
-      const ownedObjectUrl = URL.createObjectURL(blob);
-      try {
-        await downloadRelativeFile(ownedObjectUrl, filename, extension);
-      } finally {
-        setTimeout(() => URL.revokeObjectURL(ownedObjectUrl), 60_000);
+        await downloadViaOffscreenBlob(
+          { buffer: bytes, mimeType: message.mimeType || "application/octet-stream" },
+          filename,
+          extension
+        );
       }
       return { ok: true, extension };
+    }
+
+    case "dispatchLibraryKey": {
+      const tabId = sender && sender.tab && sender.tab.id;
+      if (!tabId) throw new Error("dispatchLibraryKey had no tab");
+      await dispatchTrustedLibraryKey(tabId, message.key);
+      return { ok: true };
     }
 
     case "reportError": {
@@ -297,6 +301,7 @@ async function handleMessage(message, sender) {
     case "endSession": {
       await stopKeepalive();
       stopIconAnimation();
+      await detachDebugger(debuggerTabId);
       await closeOffscreenDocumentIfExists();
       return { ok: true };
     }
@@ -328,6 +333,45 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function detachDebugger(tabId) {
+  if (!tabId) return;
+  try {
+    await chrome.debugger.detach({ tabId });
+  } catch (_) {
+    /* already detached */
+  }
+  if (debuggerTabId === tabId) debuggerTabId = null;
+}
+
+async function dispatchTrustedLibraryKey(tabId, name) {
+  const spec = LIBRARY_KEYS[name];
+  if (!spec) throw new Error(`Unsupported library key: ${name}`);
+  const target = { tabId };
+  let attached = false;
+  try {
+    try {
+      await chrome.debugger.attach(target, DEBUGGER_PROTOCOL);
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : err);
+      if (!/already attached/i.test(msg)) throw err;
+      await detachDebugger(tabId);
+      await chrome.debugger.attach(target, DEBUGGER_PROTOCOL);
+    }
+    attached = true;
+    debuggerTabId = tabId;
+    const event = {
+      key: spec.key,
+      code: spec.code,
+      windowsVirtualKeyCode: spec.windowsVirtualKeyCode,
+      nativeVirtualKeyCode: spec.nativeVirtualKeyCode,
+    };
+    await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { ...event, type: "keyDown" });
+    await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", { ...event, type: "keyUp" });
+  } finally {
+    if (attached) await detachDebugger(tabId);
+  }
+}
+
 function assertSafeRelativeFilename(filename) {
   const value = String(filename || "").replace(/\\/g, "/");
   if (!value || value.startsWith("/") || value.includes("\0") || /^[A-Za-z]:/.test(value)) {
@@ -338,6 +382,53 @@ function assertSafeRelativeFilename(filename) {
     throw new Error("Refusing a download path outside the save folder");
   }
   return value;
+}
+
+function bytesToDataUrl(bytes, mime) {
+  const chunkSize = 0x1000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, slice);
+  }
+  return `data:${mime};base64,${btoa(binary)}`;
+}
+
+async function downloadViaOffscreenBlob(parts, filename, extension) {
+  // Match the WAV path: the offscreen document (a DOM) creates the blob URL.
+  // Do not close an offscreen document that is already holding the capture stream.
+  const existed = await offscreenDocumentExists();
+  const staged = await sendToOffscreenWithRetry({
+    target: "offscreen",
+    type: "stageBlob",
+    text: parts.text,
+    buffer: parts.buffer,
+    mimeType: parts.mimeType,
+  });
+  if (!staged || !staged.ok || !staged.objectUrl) {
+    throw new Error(staged && staged.error ? staged.error : "Could not stage the download");
+  }
+  try {
+    await downloadRelativeFile(staged.objectUrl, filename, extension);
+  } finally {
+    try {
+      await chrome.runtime.sendMessage({
+        target: "offscreen",
+        type: "revokeBlob",
+        objectUrl: staged.objectUrl,
+      });
+    } catch (_) {
+      /* document may already be gone */
+    }
+    if (!existed) {
+      try {
+        const probe = await chrome.runtime.sendMessage({ target: "offscreen", type: "hasStream" });
+        if (!probe || !probe.hasStream) await closeOffscreenDocumentIfExists();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
 }
 
 async function downloadRelativeFile(url, filename, extension) {

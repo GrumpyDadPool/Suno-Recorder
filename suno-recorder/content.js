@@ -58,6 +58,8 @@ let stopRequested = false;
 let heartbeatTimer = null;
 // titleKey -> approx discovery scroll index (helps remount jumps)
 const titleScrollIndex = new Map();
+// Library scans only. One song must not send these keys or attach the debugger.
+let libraryKeysBroken = false;
 
 function touchHeartbeat() {
   try {
@@ -264,6 +266,204 @@ async function scrollLibraryToTop() {
   await sleep(200);
 }
 
+// Same step, poll, and harvest as the downward scan. Three attempts that mount
+// no new titles means that direction is exhausted (the top, when scrolling up).
+async function scrollHarvesting(direction, discovered, harvest, log, until, move) {
+  const STABLE_LIMIT = 3;
+  let stableRounds = 0;
+  let lastSize = discovered.size;
+  const label = direction === "up" ? "up" : "down";
+  const found = () => typeof until === "function" && until();
+
+  for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
+    assertAlive();
+    if (found()) {
+      return { stopped: Boolean(stopRequested), found: true };
+    }
+    const state = await getState();
+    if (stopRequested || !state || state.status === "idle") {
+      log("Scan stopped.");
+      return { stopped: true, found: false };
+    }
+    if (move) await move();
+    else if (direction === "up") scrollLibraryUp();
+    else scrollLibraryDown();
+    const pollStart = Date.now();
+    while (Date.now() - pollStart < 3500) {
+      if (stopRequested) break;
+      assertAlive();
+      harvest(discovered, i + 1);
+      if (found()) return { stopped: false, found: true };
+      if (discovered.size > lastSize) break;
+      await sleep(250);
+    }
+    harvest(discovered, i + 1);
+    if (found()) return { stopped: false, found: true };
+    if (discovered.size > lastSize) {
+      log(`  scroll ${label} attempt ${i + 1}: ${discovered.size} unique titles so far (+${discovered.size - lastSize})`);
+      lastSize = discovered.size;
+      stableRounds = 0;
+    } else {
+      stableRounds += 1;
+      log(`  scroll ${label} attempt ${i + 1}: ${discovered.size} unique titles (no new titles this attempt)`);
+      if (stableRounds >= STABLE_LIMIT) {
+        if (direction === "up") {
+          log(`  no new tracks after ${STABLE_LIMIT} scroll(s) — top of the library reached.`);
+        } else {
+          log(`  no new tracks after ${STABLE_LIMIT} scroll(s) — bottom of the library reached.`);
+        }
+        return { stopped: false, found: false };
+      }
+    }
+  }
+  return { stopped: false, found: false };
+}
+
+const LIBRARY_NAV_KEYS = new Set(["Home", "End", "PageUp", "PageDown"]);
+
+function isRowPlayButton(el) {
+  if (!el || el.tagName !== "BUTTON") return false;
+  return Boolean(parseRowLabel((el.getAttribute && el.getAttribute("aria-label")) || ""));
+}
+
+// Home / Page Up / Page Down scroll the list. They must not focus or activate a
+// row Play button — that starts a song, and a second activation stops it.
+function blurRowPlaybackFocus() {
+  const active = document.activeElement;
+  if (!active || active === document.body || typeof active.blur !== "function") return;
+  if (isRowPlayButton(active) || insidePlayControl(active)) active.blur();
+}
+
+// The list scroll parent scrollLibraryDown steps. Focus that element, not a row
+// control. One song never calls this.
+function focusLibraryScroller() {
+  const buttons = getRowButtons();
+  const anchor = buttons[buttons.length - 1] || buttons[0];
+  const scroller = anchor ? getScrollParent(anchor) : libraryScroller();
+  if (!scroller) return null;
+  blurRowPlaybackFocus();
+  if (scroller !== document.body && scroller !== document.documentElement && !scroller.hasAttribute("tabindex")) {
+    scroller.setAttribute("tabindex", "-1");
+  }
+  if (typeof scroller.focus === "function") {
+    try {
+      scroller.focus({ preventScroll: true });
+    } catch (_) {
+      try {
+        scroller.focus();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+  if (document.activeElement !== scroller) blurRowPlaybackFocus();
+  return scroller;
+}
+
+// Let the scroller's default Home/Page action run, but don't let the key reach
+// a Play button or a page hotkey that starts audio.
+function holdNavigationKeys(scroller) {
+  const block = (event) => {
+    if (!LIBRARY_NAV_KEYS.has(event.key)) return;
+    const target = event.target;
+    const onRowPlay =
+      target &&
+      target !== scroller &&
+      (isRowPlayButton(target) || insidePlayControl(target) || (target.closest && target.closest("button") && isRowPlayButton(target.closest("button"))));
+    if (onRowPlay) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+    if (target === scroller) event.stopPropagation();
+  };
+  window.addEventListener("keydown", block, true);
+  return () => window.removeEventListener("keydown", block, true);
+}
+
+async function pressLibraryKey(name, log) {
+  if (libraryKeysBroken) return false;
+  const release = holdNavigationKeys(focusLibraryScroller());
+  try {
+    focusLibraryScroller();
+    const response = await chrome.runtime.sendMessage({
+      target: "background",
+      type: "dispatchLibraryKey",
+      key: name,
+    });
+    if (!response || !response.ok) {
+      throw new Error(response && response.error ? response.error : "debugger key failed");
+    }
+    return true;
+  } catch (err) {
+    libraryKeysBroken = true;
+    log(`  debugger attach failed (${err && err.message ? err.message : err}); falling back to element scroll.`);
+    return false;
+  } finally {
+    release();
+  }
+}
+
+async function homeLibraryToTop(log) {
+  const CAP = 4;
+  for (let i = 0; i < CAP; i++) {
+    if (stopRequested) return false;
+    const before = focusLibraryScroller();
+    if (i > 0 && before && before.scrollTop <= 2) return true;
+    const ok = await pressLibraryKey("Home", log);
+    if (!ok) return false;
+    await sleep(400);
+    const after = focusLibraryScroller();
+    if (after && after.scrollTop <= 2) return true;
+  }
+  return !libraryKeysBroken;
+}
+
+function elementScrollStep(direction) {
+  if (direction === "up") scrollLibraryUp();
+  else scrollLibraryDown();
+}
+
+async function scanLibraryFromTop(log, harvest) {
+  libraryKeysBroken = false;
+  log("Pressing Home to reach the top of the library.");
+  const trusted = await homeLibraryToTop(log);
+  if (stopRequested) return { stopped: true, discovered: new Map(), upward: new Map() };
+
+  const upward = new Map();
+  harvest(upward, 0);
+  if (!trusted) {
+    log("Debugger could not send keys. Falling back to element scroll steps.");
+  } else {
+    log("Pressing Page Up until three attempts add nothing, then Page Down.");
+  }
+
+  const keyStep = (direction) => async () => {
+    if (libraryKeysBroken) {
+      elementScrollStep(direction);
+      return;
+    }
+    const ok = await pressLibraryKey(direction === "up" ? "PageUp" : "PageDown", log);
+    if (!ok) elementScrollStep(direction);
+  };
+
+  log(`${trusted ? "Starting Page Up" : "Starting scroll up"} — ${upward.size} tracks visible.`);
+  const up = await scrollHarvesting("up", upward, harvest, log, null, trusted ? keyStep("up") : null);
+  if (up.stopped || stopRequested) return { stopped: true, discovered: upward, upward };
+
+  const downTrusted = trusted && !libraryKeysBroken;
+  log(
+    downTrusted
+      ? "Page Up settled. Scanning down with Page Down."
+      : "Reached the top. Scanning down through the library."
+  );
+  const discovered = new Map();
+  harvest(discovered, 0);
+  log(`${downTrusted ? "Starting Page Down" : "Starting scroll down"} — ${discovered.size} tracks visible.`);
+  await scrollHarvesting("down", discovered, harvest, log, null, downTrusted ? keyStep("down") : null);
+  return { stopped: Boolean(stopRequested), discovered, upward };
+}
+
 function harvestVisibleTitles(intoMap, scrollIndex) {
   let added = 0;
   for (const row of collectVisibleRows()) {
@@ -278,64 +478,11 @@ function harvestVisibleTitles(intoMap, scrollIndex) {
 
 async function discoverAllTitles(log) {
   titleScrollIndex.clear();
-  // A halfway scroll would miss every row above the viewport. Start Recording
-  // always walks the library from the first song.
-  log("Scrolling the library to the top before scanning.");
-  await scrollLibraryToTop();
-  const discovered = new Map();
-  harvestVisibleTitles(discovered, 0);
-  log(`Starting scroll — ${discovered.size} tracks visible before scrolling.`);
-
-  // Consecutive downward scrolls with no new titles before we accept we've hit
-  // the bottom of the library and jump back to the top.
-  const STABLE_LIMIT = 3;
-  let stableRounds = 0;
-  let lastSize = discovered.size;
-  let stopped = false;
-
-  for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
-    assertAlive();
-    const state = await getState();
-    if (stopRequested || !state || state.status === "idle") {
-      log("Scan stopped.");
-      stopped = true;
-      break;
-    }
-
-    scrollLibraryDown();
-
-    // Poll for newly mounted virtualized rows (count may stay flat while titles change).
-    const pollStart = Date.now();
-    while (Date.now() - pollStart < 3500) {
-      if (stopRequested) break;
-      assertAlive();
-      harvestVisibleTitles(discovered, i + 1);
-      if (discovered.size > lastSize) break;
-      await sleep(250);
-    }
-    harvestVisibleTitles(discovered, i + 1);
-
-    if (discovered.size > lastSize) {
-      log(`  scroll attempt ${i + 1}: ${discovered.size} unique titles so far (+${discovered.size - lastSize})`);
-      lastSize = discovered.size;
-      stableRounds = 0;
-    } else {
-      stableRounds++;
-      log(`  scroll attempt ${i + 1}: ${discovered.size} unique titles (no new titles this attempt)`);
-      if (stableRounds >= STABLE_LIMIT) {
-        log(`  no new tracks after ${STABLE_LIMIT} scroll(s) — returning to the top to start from the first song.`);
-        break;
-      }
-    }
+  const scan = await scanLibraryFromTop(log, (map, index) => harvestVisibleTitles(map, index));
+  const discovered = scan.discovered;
+  for (const [key, title] of scan.upward) {
+    if (!discovered.has(key)) discovered.set(key, title);
   }
-
-  // Finish discovery back at the very top so the capture phase finds the
-  // first/next song from there instead of hunting upward from the bottom.
-  if (!stopped) {
-    await scrollLibraryToTop();
-    harvestVisibleTitles(discovered, 0);
-  }
-
   const titles = Array.from(discovered.values());
   log(`Scrolled through the library, found ${titles.length} unique tracks.`);
   return titles;
@@ -589,9 +736,16 @@ async function findButtonByTitle(title, log) {
     if (hit) return hit;
   }
 
-  await scrollLibraryToTop();
+  const seen = new Map();
+  const harvestRows = (map) => {
+    for (const row of collectVisibleRows()) {
+      if (row.key && !map.has(row.key)) map.set(row.key, row.title);
+    }
+  };
+  harvestRows(seen);
+  const up = await scrollHarvesting("up", seen, harvestRows, log, () => Boolean(findVisibleButtonByTitle(title)));
   hit = findVisibleButtonByTitle(title);
-  if (hit) return hit;
+  if (hit || up.stopped || stopRequested) return hit;
 
   for (let i = 0; i < BUTTON_FIND_SCROLL_ATTEMPTS; i++) {
     if (stopRequested) return null;
@@ -1030,7 +1184,7 @@ function findCoverImage(track) {
 
 // Song lyrics are the multi-line pre-wrap block in the open details panel, next
 // to the "Image for <title>" cover. The library filter tab named Lyrics is not
-// that text. A closed panel has nothing to save.
+// that text. The panel has to be showing this song before the text can be read.
 function findLyricsText(track) {
   if (typeof normalizeLyrics !== "function") return "";
   const title = String(track.title || "").trim();
@@ -1115,23 +1269,201 @@ async function saveCoverFromSrc(src, filename, log) {
   return true;
 }
 
-async function saveLyricsAndCover(track, filename, log, coverSrc) {
-  try {
-    await saveLyricsFile(track, filename, log);
-  } catch (err) {
-    log(`  ! lyrics save failed: ${err && err.message ? err.message : err}`);
-  }
+function panelShowsTitle(title) {
+  const wanted = titleKey(title);
+  if (!wanted || typeof coverAltTitle !== "function") return false;
+  return Array.from(document.images).some((img) => {
+    if (!isShown(img)) return false;
+    const alt = img.alt || "";
+    if (!/^image for /i.test(alt)) return false;
+    const altTitle = coverAltTitle(alt);
+    return Boolean(altTitle) && titleKey(altTitle) === wanted;
+  });
+}
 
-  const image = findCoverImage(track);
-  const src = coverSrc || (image ? image.currentSrc || image.src : "");
-  if (!src) {
-    log(`  no cover image for "${track.title}"`);
+function insidePlayControl(el) {
+  const button = el && typeof el.closest === "function" ? el.closest("button") : null;
+  if (!button) return false;
+  return Boolean(parseRowLabel(button.getAttribute("aria-label") || ""));
+}
+
+function titleClickTarget(row, title) {
+  if (!row || typeof row.querySelectorAll !== "function") return null;
+  const wanted = titleKey(title);
+  const candidates = [];
+  for (const el of row.querySelectorAll("a, span, p, h1, h2, h3, h4, div")) {
+    if (isRowPlayButton(el) || insidePlayControl(el)) continue;
+    const text = (el.innerText || "").replace(/\s+/g, " ").trim();
+    if (!text || titleKey(text) !== wanted) continue;
+    if (!isShown(el)) continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 8 || rect.height < 8) continue;
+    candidates.push({ el, area: rect.width * rect.height });
+  }
+  candidates.sort((a, b) => a.area - b.area);
+  return candidates.length ? candidates[0].el : null;
+}
+
+function clickElement(el, scroll) {
+  if (!el || isRowPlayButton(el) || insidePlayControl(el)) return;
+  const link = typeof el.closest === "function" ? el.closest("a[href]") : null;
+  const guard = (event) => {
+    if (link && link.contains(event.target)) event.preventDefault();
+  };
+  if (link) document.addEventListener("click", guard, true);
+  try {
+    if (scroll) {
+      try {
+        el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    // One click. A synthetic click plus el.click() toggles Play on, then off.
+    el.click();
+  } finally {
+    if (link) document.removeEventListener("click", guard, true);
+  }
+}
+
+async function waitForSongPanel(title, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (stopRequested) return false;
+    if (panelShowsTitle(title)) return true;
+    await sleep(200);
+  }
+  return panelShowsTitle(title);
+}
+
+async function findButtonForPanel(title, log) {
+  if (findVisibleButtonByTitle(title)) return findVisibleButtonByTitle(title);
+  log(`  looking for "${title}" to open its panel`);
+  const want = () => Boolean(findVisibleButtonByTitle(title));
+  const harvest = (map) => {
+    for (const row of collectVisibleRows()) {
+      if (row.key && !map.has(row.key)) map.set(row.key, row.title);
+    }
+  };
+  const seen = new Map();
+  harvest(seen);
+  const up = await scrollHarvesting("up", seen, harvest, log, want);
+  if (up.found || up.stopped || stopRequested) return findVisibleButtonByTitle(title);
+  const downSeen = new Map();
+  harvest(downSeen);
+  await scrollHarvesting("down", downSeen, harvest, log, want);
+  return findVisibleButtonByTitle(title);
+}
+
+function playbarTitleElement() {
+  const nodes = Array.from(document.querySelectorAll('[aria-label*="Playbar: Title"]')).filter(isShown);
+  return nodes.length ? nodes[nodes.length - 1] : null;
+}
+
+function panelRow(button) {
+  let node = button && button.parentElement;
+  for (let depth = 0; depth < 8 && node; depth += 1) {
+    if (node.querySelector && node.querySelector("img") && !isRowPlayButton(node) && !insidePlayControl(node)) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return button ? button.parentElement : null;
+}
+
+async function openSongPanel(title, log, opts) {
+  if (panelShowsTitle(title)) return true;
+  if (stopRequested) return false;
+  const allowLibraryScroll = !opts || opts.allowLibraryScroll !== false;
+  const button = allowLibraryScroll ? await findButtonForPanel(title, log) : findVisibleButtonByTitle(title);
+  if (stopRequested) return false;
+  if (button) {
+    const row = panelRow(button);
+    const target = titleClickTarget(row, title);
+    if (target) {
+      log(`  opening song panel for "${title}"`);
+      clickElement(target, allowLibraryScroll);
+      if (await waitForSongPanel(title, 5000)) return true;
+    }
+  }
+  if (!allowLibraryScroll) {
+    const bar = readPlaybarTrack();
+    const el = playbarTitleElement();
+    if (bar.title && titleKey(bar.title) === titleKey(title) && el) {
+      log(`  opening song panel from the play bar for "${title}"`);
+      clickElement(el, false);
+      if (await waitForSongPanel(title, 5000)) return true;
+    }
+  }
+  log(`  song panel did not show "${title}"`);
+  return false;
+}
+
+function playbackSnapshot() {
+  let title = "";
+  try {
+    title = readPlaybarTrack().title || "";
+  } catch (_) {
+    title = "";
+  }
+  return { playing: Boolean(findPlayingMedia() || isPlaybarPlaying()), title };
+}
+
+async function restorePlayback(snapshot, log, allowLibraryScroll) {
+  if (!snapshot || stopRequested) return;
+  const playingNow = Boolean(findPlayingMedia() || isPlaybarPlaying());
+  if (snapshot.playing && !playingNow) {
+    const button = findPlaybarTransportButton();
+    if (button && !buttonShowsPause(button)) {
+      log("  returning to playback");
+      button.click();
+      await sleep(300);
+    }
     return;
   }
+  if (!snapshot.playing && playingNow) {
+    for (const media of getMediaElements()) {
+      try {
+        if (!media.paused) media.pause();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    if (findPlayingMedia() || isPlaybarPlaying()) {
+      const pauseBtn = findActivePauseButton();
+      if (pauseBtn) pauseBtn.click();
+    }
+    log("  paused playback the panel click started");
+  }
+}
+
+async function saveLyricsAndCover(track, filename, log, coverSrc, opts) {
+  const allowLibraryScroll = !opts || opts.allowLibraryScroll !== false;
+  const snapshot = playbackSnapshot();
   try {
-    await saveCoverFromSrc(src, filename, log);
-  } catch (err) {
-    log(`  ! cover save failed: ${err && err.message ? err.message : err}`);
+    if (!panelShowsTitle(track.title)) {
+      await openSongPanel(track.title, log, { allowLibraryScroll });
+    }
+    if (stopRequested) return;
+    try {
+      await saveLyricsFile(track, filename, log);
+    } catch (err) {
+      log(`  ! lyrics save failed: ${err && err.message ? err.message : err}`);
+    }
+
+    const image = findCoverImage(track);
+    const src = (image ? image.currentSrc || image.src : "") || coverSrc || "";
+    if (!src) {
+      log(`  no cover image for "${track.title}"`);
+      return;
+    }
+    try {
+      await saveCoverFromSrc(src, filename, log);
+    } catch (err) {
+      log(`  ! cover save failed: ${err && err.message ? err.message : err}`);
+    }
+  } finally {
+    await restorePlayback(snapshot, log, allowLibraryScroll);
   }
 }
 
@@ -1174,54 +1506,15 @@ function harvestVisibleSidecars(intoMap) {
 }
 
 async function discoverSidecars(log) {
-  // Lyrics and covers has no audio, but it still walks rows top to bottom.
-  log("Scrolling the library to the top before scanning.");
-  await scrollLibraryToTop();
-  const discovered = new Map();
-  harvestVisibleSidecars(discovered);
-  log(`Starting scroll — ${discovered.size} tracks visible before scrolling.`);
-  const STABLE_LIMIT = 3;
-  let stableRounds = 0;
-  let lastSize = discovered.size;
-
-  for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
-    assertAlive();
-    const state = await getState();
-    if (stopRequested || !state || state.status === "idle") {
-      log("Scan stopped.");
-      break;
-    }
-    scrollLibraryDown();
-    const pollStart = Date.now();
-    while (Date.now() - pollStart < 3500) {
-      if (stopRequested) break;
-      assertAlive();
-      harvestVisibleSidecars(discovered);
-      if (discovered.size > lastSize) break;
-      await sleep(250);
-    }
-    harvestVisibleSidecars(discovered);
-    if (discovered.size > lastSize) {
-      log(`  scroll attempt ${i + 1}: ${discovered.size} unique titles so far (+${discovered.size - lastSize})`);
-      lastSize = discovered.size;
-      stableRounds = 0;
-    } else {
-      stableRounds += 1;
-      log(`  scroll attempt ${i + 1}: ${discovered.size} unique titles (no new titles this attempt)`);
-      if (stableRounds >= STABLE_LIMIT) break;
-    }
+  const scan = await scanLibraryFromTop(log, (map) => harvestVisibleSidecars(map));
+  const discovered = scan.discovered;
+  for (const [fold, item] of scan.upward) {
+    const previous = discovered.get(fold);
+    if (!previous) discovered.set(fold, item);
+    else if (!previous.coverSrc && item.coverSrc) previous.coverSrc = item.coverSrc;
   }
   log(`Scrolled through the library, found ${discovered.size} unique tracks.`);
   return Array.from(discovered.values());
-}
-
-function titleAlreadySaved(title, skipKeys) {
-  const key = titleKey(title);
-  const fold = foldTitleKey(title);
-  for (const existing of skipKeys) {
-    if (existing === key || String(existing).toLowerCase() === fold) return true;
-  }
-  return false;
 }
 
 async function runLyricsAndCovers(log) {
@@ -1251,7 +1544,8 @@ async function runLyricsAndCovers(log) {
     log(`Limiting to the first ${items.length} of ${discoveredTotal} tracks (Options → Max tracks).`);
   }
 
-  const skipKeys = options.skipCaptured !== false ? await collectPreviouslyCapturedKeys(options, log) : new Set();
+  // The recorded-song list means a WAV was saved. This pass still writes lyrics
+  // and covers for those titles. Duplicate names inside this run are saved once.
   const seen = new Set();
   const results = [];
   const startedAt = Date.now();
@@ -1272,14 +1566,11 @@ async function runLyricsAndCovers(log) {
     }
     const item = items[i];
     const fold = foldTitleKey(item.title);
-    if (!fold || seen.has(fold)) continue;
-    seen.add(fold);
-
-    if (titleAlreadySaved(item.title, skipKeys)) {
-      log(`Skipping (already saved): ${item.title}`);
-      results.push({ title: item.title, done: true, failed: false, skipped: true });
+    if (!fold || seen.has(fold)) {
+      if (fold && seen.has(fold)) log(`Skipping duplicate in this run: ${item.title}`);
       continue;
     }
+    seen.add(fold);
 
     log(`Lyrics and cover (${results.length + 1}/${items.length}): ${item.title}`);
     await setState({
@@ -1294,7 +1585,9 @@ async function runLyricsAndCovers(log) {
 
     const filename = buildRelativePath(options.saveFolder, options.filenamePrefix || "", item.title);
     try {
-      await saveLyricsAndCover({ title: item.title, id: "" }, filename, log, item.coverSrc);
+      await saveLyricsAndCover({ title: item.title, id: "" }, filename, log, item.coverSrc, {
+        allowLibraryScroll: true,
+      });
       results.push({ title: item.title, done: true, failed: false });
     } catch (err) {
       log(`  ! error saving lyrics/cover for "${item.title}": ${err && err.message ? err.message : err}`);
@@ -1376,7 +1669,9 @@ async function recordPlaybarTrack(track, log) {
   }
   const savedAs = (stopResponse && stopResponse.extension) || "wav";
   log(`  saved ${filename}.${savedAs}`);
-  await saveLyricsAndCover(sidecarTrack(track.title, identity), filename, log);
+  await saveLyricsAndCover(sidecarTrack(track.title, identity), filename, log, "", {
+    allowLibraryScroll: false,
+  });
   return true;
 }
 
@@ -1524,7 +1819,9 @@ async function playRowAndWait(title, log) {
   }
   const savedAs = (stopResponse && stopResponse.extension) || "wav";
   log(`  saved ${filename}.${savedAs}`);
-  await saveLyricsAndCover(sidecarTrack(title, libraryIdentity), filename, log);
+  await saveLyricsAndCover(sidecarTrack(title, libraryIdentity), filename, log, "", {
+    allowLibraryScroll: false,
+  });
   return true;
 }
 
