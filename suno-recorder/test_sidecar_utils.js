@@ -1,5 +1,12 @@
 const assert = require("assert");
-const { isSunoCoverUrl, coverAltTitle, imageExtension, normalizeLyrics } = require("./sidecar_utils.js");
+const {
+  isSunoCoverUrl,
+  coverAltTitle,
+  imageExtension,
+  normalizeLyrics,
+  lyricsPresence,
+  planSidecarSave,
+} = require("./sidecar_utils.js");
 
 const SAMPLE = "Sample Track";
 
@@ -29,6 +36,58 @@ assert.strictEqual(normalizeLyrics(""), "");
 assert.strictEqual(normalizeLyrics("   \n  "), "");
 assert.strictEqual(normalizeLyrics("Instrumental"), "");
 assert.strictEqual(normalizeLyrics("No lyrics available"), "");
+assert.strictEqual(normalizeLyrics("This song is instrumental"), "");
+assert.strictEqual(normalizeLyrics("Lyrics\n[Verse]\nLine one"), "[Verse]\nLine one");
 assert.strictEqual(normalizeLyrics("[Verse]\nLine one\n\n\nLine two\n"), "[Verse]\nLine one\n\nLine two");
+
+assert.strictEqual(lyricsPresence(""), "empty");
+assert.strictEqual(lyricsPresence("Lyrics"), "empty");
+assert.strictEqual(lyricsPresence("No lyrics available"), "absent");
+assert.strictEqual(lyricsPresence("Lyrics\nInstrumental"), "absent");
+assert.strictEqual(lyricsPresence("[Verse]\nLine one"), "lyrics");
+
+const saved = [
+  { filename: "C:/Users/kevin/Downloads/Suno/Bubble Pop.txt", bytes: 80 },
+  { filename: "C:/Users/kevin/Downloads/Suno/Bubble Pop.jpg", bytes: 1200 },
+  { filename: "C:/Users/kevin/Downloads/Suno/Bubble Pop (1).jpg", bytes: 1200 },
+  { filename: "C:/Users/kevin/Downloads/Suno/Cover Only.jpg", bytes: 900 },
+  { filename: "C:/Users/kevin/Downloads/Suno/Empty.txt", bytes: 0 },
+  { filename: "C:/Users/kevin/Downloads/Suno/Lyrics Only.txt", bytes: 40 },
+];
+assert.deepStrictEqual(planSidecarSave(saved, "Suno/Bubble Pop"), {
+  hasLyrics: true,
+  hasCover: true,
+  skipSong: true,
+  saveLyrics: false,
+  saveCover: false,
+});
+assert.deepStrictEqual(planSidecarSave(saved, "Suno/Cover Only"), {
+  hasLyrics: false,
+  hasCover: true,
+  skipSong: false,
+  saveLyrics: true,
+  saveCover: false,
+});
+assert.deepStrictEqual(planSidecarSave(saved, "Suno/Empty"), {
+  hasLyrics: false,
+  hasCover: false,
+  skipSong: false,
+  saveLyrics: true,
+  saveCover: true,
+});
+assert.deepStrictEqual(planSidecarSave(saved, "Suno/Lyrics Only"), {
+  hasLyrics: true,
+  hasCover: false,
+  skipSong: false,
+  saveLyrics: false,
+  saveCover: true,
+});
+assert.strictEqual(
+  planSidecarSave(
+    [{ filename: "C:/Users/kevin/Downloads/Suno/Bubble Pop (1).jpg", bytes: 1200 }],
+    "Suno/Bubble Pop"
+  ).hasCover,
+  false
+);
 
 console.log("sidecar_utils ok");
