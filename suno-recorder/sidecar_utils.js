@@ -79,6 +79,19 @@ function normalizeLyrics(text) {
   return value;
 }
 
+// Styles go on top of the same text file. Either part alone is still worth
+// saving. Both empty is not a file.
+function composeSidecarText(styles, lyrics) {
+  const styleText = String(styles || "")
+    .replace(/\u00a0/g, " ")
+    .trim();
+  const lyricText = String(lyrics || "")
+    .replace(/\u00a0/g, " ")
+    .trim();
+  if (styleText && lyricText) return `${styleText}\n\n${lyricText}`;
+  return styleText || lyricText;
+}
+
 // "lyrics" is real song text. "absent" is a placeholder that says the song has
 // no lyrics. "empty" means this read did not show either one yet.
 function lyricsPresence(text) {
@@ -137,6 +150,7 @@ if (typeof module !== "undefined") {
     imageExtension,
     normalizeLyrics,
     lyricsPresence,
+    composeSidecarText,
     planSidecarSave,
   };
 }

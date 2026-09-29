@@ -30,4 +30,4 @@ Options: max tracks, filename prefix, **save folder**, skip done, **recorded son
 - On each track end the playbar is paused before encode/download, so Suno’s
   auto-advance can’t hitch the next track (no MediaRecorder timeslice; the
   recorder warms up ≥700ms before playback so intros aren’t clipped)
-- Version: see `manifest.json` (currently **1.5.8**)
+- Version: see `manifest.json` (currently **1.6**)
