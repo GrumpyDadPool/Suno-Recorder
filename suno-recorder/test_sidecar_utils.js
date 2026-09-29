@@ -5,6 +5,7 @@ const {
   imageExtension,
   normalizeLyrics,
   lyricsPresence,
+  composeSidecarText,
   planSidecarSave,
 } = require("./sidecar_utils.js");
 
@@ -45,6 +46,15 @@ assert.strictEqual(lyricsPresence("Lyrics"), "empty");
 assert.strictEqual(lyricsPresence("No lyrics available"), "absent");
 assert.strictEqual(lyricsPresence("Lyrics\nInstrumental"), "absent");
 assert.strictEqual(lyricsPresence("[Verse]\nLine one"), "lyrics");
+
+assert.strictEqual(composeSidecarText("", ""), "");
+assert.strictEqual(composeSidecarText("   ", "  "), "");
+assert.strictEqual(composeSidecarText("Soft piano, slow pulse", ""), "Soft piano, slow pulse");
+assert.strictEqual(composeSidecarText("", "[Verse]\nLine one"), "[Verse]\nLine one");
+assert.strictEqual(
+  composeSidecarText("Soft piano, slow pulse", "[Verse]\nLine one"),
+  "Soft piano, slow pulse\n\n[Verse]\nLine one"
+);
 
 const saved = [
   { filename: "C:/Users/kevin/Downloads/Suno/Bubble Pop.txt", bytes: 80 },

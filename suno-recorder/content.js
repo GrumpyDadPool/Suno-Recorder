@@ -52,6 +52,10 @@ const RECORDER_WARMUP_MS = 750;
 // before deciding there are no lyrics. Stop is the only cancel.
 const LYRICS_POLL_MS = 400;
 const LYRICS_ABSENT_STABLE_MS = 4000;
+// After a row click, poll until the open song panel shows that title.
+// Only this wait may fail the song; a miss must not advance the loop early.
+const PANEL_OPEN_WAIT_MS = 4000;
+const PANEL_OPEN_POLL_MS = 250;
 
 let sessionRunning = false;
 let startPending = false;
@@ -65,6 +69,9 @@ let heartbeatTimer = null;
 const titleScrollIndex = new Map();
 // Library scans only. One song must not send these keys or attach the debugger.
 let libraryKeysBroken = false;
+// Styles "Show more" stays expanded across songs. Click again only if a later
+// song is collapsed and that control says Show more.
+let stylesExpandedThisPass = false;
 
 function touchHeartbeat() {
   try {
@@ -183,7 +190,7 @@ async function collectPreviouslyCapturedKeys(options, log) {
 
   const keys = new Set(titles.map((entry) => entry.key).filter(Boolean));
   keys.delete("");
-  if (keys.size) log(`Skipping ${keys.size} title(s) already on the recorded-song list.`);
+  if (keys.size) log(`${keys.size} title(s) already on the recorded-song list — those WAVs will not be downloaded.`);
   return keys;
 }
 
@@ -350,16 +357,91 @@ function blurRowPlaybackFocus() {
   if (isRowPlayButton(active) || insidePlayControl(active)) active.blur();
 }
 
-// The list scroll parent scrollLibraryDown steps. Focus that element, not a row
-// control. One song never calls this.
+function canScrollElement(el) {
+  if (!el || el === document.body || el === document.documentElement || el === document.scrollingElement) return false;
+  return el.scrollHeight > el.clientHeight + 8;
+}
+
+function overflowScrolls(el) {
+  if (!canScrollElement(el)) return false;
+  try {
+    const style = getComputedStyle(el);
+    return /auto|scroll|overlay/.test(`${style.overflowY} ${style.overflow}`);
+  } catch (_) {
+    return false;
+  }
+}
+
+// Smallest ancestor that holds the library rows. A page wrapper that also holds
+// the open song panel is larger, and focusing that wrapper leaves Page Down on the panel.
+function tightLibraryList() {
+  let best = null;
+  let bestArea = Infinity;
+  for (const btn of getRowButtons()) {
+    if (!isShown(btn)) continue;
+    let node = btn.parentElement;
+    for (let depth = 0; depth < 16 && node && node !== document.body && node !== document.documentElement; depth += 1) {
+      if (elementContainsLibraryList(node)) {
+        const rect = node.getBoundingClientRect();
+        const area = Math.max(0, rect.width) * Math.max(0, rect.height);
+        if (area > 0 && area < bestArea) {
+          bestArea = area;
+          best = node;
+        }
+        break;
+      }
+      node = node.parentElement;
+    }
+  }
+  return best;
+}
+
+// The library scroll parent: the element whose scrollTop moves when Page Down hits the list.
+function libraryListScroller() {
+  const list = tightLibraryList();
+  if (!list) return libraryScrollRoot();
+  if (overflowScrolls(list)) return list;
+  const inner = Array.from(list.querySelectorAll("div")).find(
+    (el) => overflowScrolls(el) && elementContainsLibraryList(el)
+  );
+  if (inner) return inner;
+  let node = list.parentElement;
+  for (let depth = 0; depth < 6 && node && node !== document.body && node !== document.documentElement; depth += 1) {
+    if (overflowScrolls(node)) return node;
+    node = node.parentElement;
+  }
+  const chain = [list];
+  node = list.parentElement;
+  for (let depth = 0; depth < 6 && node && node !== document.body && node !== document.documentElement; depth += 1) {
+    chain.push(node);
+    node = node.parentElement;
+  }
+  let roomiest = null;
+  let room = 0;
+  for (const el of chain) {
+    const extra = el.scrollHeight - el.clientHeight;
+    if (extra > room) {
+      room = extra;
+      roomiest = el;
+    }
+  }
+  return roomiest || libraryScrollRoot() || list;
+}
+
+// Blur is not enough once a song panel is open: Page Down follows focus.
+// Focus the library scroll parent itself. One song never calls this.
 function focusLibraryScroller() {
-  const buttons = getRowButtons();
-  const anchor = buttons[buttons.length - 1] || buttons[0];
-  const scroller = anchor ? getScrollParent(anchor) : libraryScroller();
+  const scroller = libraryListScroller();
   if (!scroller) return null;
+  const blurAway = () => {
+    const active = document.activeElement;
+    if (!active || active === scroller || typeof active.blur !== "function") return;
+    active.blur();
+  };
+  blurAway();
   blurRowPlaybackFocus();
-  if (scroller !== document.body && scroller !== document.documentElement && !scroller.hasAttribute("tabindex")) {
-    scroller.setAttribute("tabindex", "-1");
+  if (scroller !== document.body && scroller !== document.documentElement && scroller.tabIndex < 0) {
+    scroller.tabIndex = -1;
   }
   if (typeof scroller.focus === "function") {
     try {
@@ -368,12 +450,21 @@ function focusLibraryScroller() {
       /* A focus without preventScroll scrolls the virtualized list and clips page 1. */
     }
   }
-  if (document.activeElement !== scroller) blurRowPlaybackFocus();
+  if (document.activeElement !== scroller) {
+    blurAway();
+    blurRowPlaybackFocus();
+    try {
+      scroller.focus({ preventScroll: true });
+    } catch (_) {
+      /* ignore */
+    }
+  }
   return scroller;
 }
 
-// Let the scroller's default Home/Page action run, but don't let the key reach
-// a Play button or a page hotkey that starts audio.
+// Block Home/Page keys only when they would hit a row Play button. This listener
+// runs on window during capture; stopping the event while the library scroller
+// is focused swallows Home/Page Up/Page Down before Suno can scroll.
 function holdNavigationKeys(scroller) {
   const block = (event) => {
     if (!LIBRARY_NAV_KEYS.has(event.key)) return;
@@ -382,15 +473,19 @@ function holdNavigationKeys(scroller) {
       target &&
       target !== scroller &&
       (isRowPlayButton(target) || insidePlayControl(target) || (target.closest && target.closest("button") && isRowPlayButton(target.closest("button"))));
-    if (onRowPlay) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      return;
-    }
-    if (target === scroller) event.stopPropagation();
+    if (!onRowPlay) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
   };
   window.addEventListener("keydown", block, true);
   return () => window.removeEventListener("keydown", block, true);
+}
+
+function visibleLibrarySignature() {
+  return collectVisibleRows()
+    .map((row) => row.key)
+    .sort()
+    .join("\n");
 }
 
 async function pressLibraryKey(name, log) {
@@ -416,19 +511,44 @@ async function pressLibraryKey(name, log) {
   }
 }
 
+// Trusted Home, not scrollTop. scrollTop stays near 0 on Suno's virtualized list
+// even when the first song is off screen, so it cannot mean "at the top".
 async function homeLibraryToTop(log) {
   const CAP = 4;
   for (let i = 0; i < CAP; i++) {
     if (stopRequested) return false;
-    const before = focusLibraryScroller();
-    if (i > 0 && before && before.scrollTop <= 2) return true;
+    focusLibraryScroller();
+    const before = visibleLibrarySignature();
     const ok = await pressLibraryKey("Home", log);
     if (!ok) return false;
     await sleep(400);
-    const after = focusLibraryScroller();
-    if (after && after.scrollTop <= 2) return true;
+    const after = visibleLibrarySignature();
+    if (i > 0 && before === after) return true;
   }
   return !libraryKeysBroken;
+}
+
+// Home until the visible rows stop changing (cap 4). If that does not move the
+// list, Page Up until three passes add no titles.
+async function returnLibraryToTop(log) {
+  log("Pressing Home to reach the top of the library.");
+  const before = visibleLibrarySignature();
+  const trusted = await homeLibraryToTop(log);
+  if (stopRequested || !trusted) return false;
+  if (before !== visibleLibrarySignature()) return true;
+  log("Home did not move the library. Pressing Page Up until three attempts add nothing.");
+  const seen = new Map();
+  const harvest = (map) => {
+    for (const row of collectVisibleRows()) {
+      if (row.key && !map.has(row.key)) map.set(row.key, row.title);
+    }
+  };
+  harvest(seen, 0);
+  await scrollHarvesting("up", seen, harvest, log, null, async () => {
+    const ok = await pressLibraryKey("PageUp", log);
+    if (!ok) elementScrollStep("up");
+  });
+  return !stopRequested;
 }
 
 function elementScrollStep(direction) {
@@ -440,6 +560,8 @@ async function scanLibraryFromTop(log, harvest) {
   libraryKeysBroken = false;
   log("Pressing Home to reach the top of the library.");
   const trusted = await homeLibraryToTop(log);
+  if (stopRequested) return { stopped: true, discovered: new Map(), upward: new Map() };
+  await selectFirstLibrarySong(log);
   if (stopRequested) return { stopped: true, discovered: new Map(), upward: new Map() };
 
   const upward = new Map();
@@ -1416,9 +1538,6 @@ function panelContentSignature(panel, scrollers) {
 // text. Visible lyrics are returned immediately. An empty panel is watched for
 // 4 seconds of unchanged content, scrolling only inside the song panel.
 async function waitForLyricsText(track, log) {
-  const library = libraryScrollRoot();
-  if (library) library.scrollTop = 0;
-  window.scrollTo(0, 0);
   const libraryAtStart = libraryScrollOffset();
   let stableSince = 0;
   let lastSignature = "";
@@ -1488,11 +1607,198 @@ function coverFetchUrl(src) {
   return url.toString();
 }
 
-async function saveLyricsFile(track, filename, log) {
+function collapsedText(el) {
+  return String((el && (el.innerText || el.textContent)) || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function exactPanelLabel(root, word) {
+  const wanted = String(word || "").toLowerCase();
+  if (!root || !wanted) return [];
+  return queryDeepAll(root, "div, span, p, h1, h2, h3, h4").filter((el) => {
+    if (el.querySelector && el.querySelector("button")) return false;
+    return collapsedText(el).toLowerCase() === wanted;
+  });
+}
+
+function stylesToggleKind(span) {
+  if (!span || !span.classList || !span.classList.contains("hxc-btn-content")) return "";
+  if (!span.querySelector || !span.querySelector("svg")) return "";
+  const text = collapsedText(span);
+  if (/^show less\b/i.test(text)) return "expanded";
+  if (/^show more\b/i.test(text)) return "collapsed";
+  return "";
+}
+
+// The Styles block is the ancestor that has a "Styles" label and this toggle,
+// and does not also contain the Lyrics label. Library "Show more" controls are
+// outside the song panel.
+function findStylesExpandControl(panel) {
+  if (!panel) return null;
+  const spans = queryDeepAll(panel, "span.hxc-btn-content");
+  for (const span of spans) {
+    const kind = stylesToggleKind(span);
+    if (!kind) continue;
+    const button = (typeof span.closest === "function" && span.closest("button")) || span;
+    let node = button.parentElement;
+    for (let depth = 0; depth < 8 && node && node !== panel.parentElement; depth += 1) {
+      const hasStyles = exactPanelLabel(node, "styles").length > 0;
+      const hasLyrics = exactPanelLabel(node, "lyrics").length > 0;
+      if (hasStyles && !hasLyrics) return { kind, button, section: node };
+      if (hasLyrics && !hasStyles) break;
+      node = node.parentElement;
+    }
+  }
+  return null;
+}
+
+function isStylesCopyButton(btn) {
+  const aria = collapsedText({ innerText: btn.getAttribute("aria-label") || "" }).toLowerCase();
+  const title = collapsedText({ innerText: btn.getAttribute("title") || "" }).toLowerCase();
+  return aria === "copy styles to clipboard" || title === "copy styles to clipboard";
+}
+
+function findStylesCopyButton(panel) {
+  if (!panel) return null;
+  return queryDeepAll(panel, "button").find((btn) => isStylesCopyButton(btn)) || null;
+}
+
+async function ensureStylesExpanded(panel, log) {
+  const control = findStylesExpandControl(panel);
+  if (!control || control.kind === "expanded") {
+    if (control && control.kind === "expanded") stylesExpandedThisPass = true;
+    return;
+  }
+  log(stylesExpandedThisPass ? "  styles collapsed again — expanding" : "  expanding styles");
+  control.button.click();
+  stylesExpandedThisPass = true;
+  const deadline = Date.now() + 1000;
+  while (!stopRequested && Date.now() < deadline) {
+    const again = findStylesExpandControl(panel);
+    if (!again || again.kind === "expanded") return;
+    await sleep(100);
+  }
+}
+
+function readStylesBesideCopyButton(panel) {
+  const button = findStylesCopyButton(panel);
+  const row = button && button.parentElement;
+  if (!row) return "";
+  const parts = [];
+  for (const child of row.children) {
+    if (child === button || (typeof child.contains === "function" && child.contains(button))) continue;
+    if (child.tagName === "BUTTON") continue;
+    const text = collapsedText(child);
+    if (!text || /^edit song details$/i.test(text)) continue;
+    parts.push(String(child.innerText || child.textContent || "").trim());
+  }
+  return parts.join("\n").trim();
+}
+
+async function readClipboardText() {
+  try {
+    if (!navigator.clipboard || typeof navigator.clipboard.readText !== "function") return { ok: false, text: "" };
+    const text = await navigator.clipboard.readText();
+    return { ok: true, text: String(text ?? "") };
+  } catch (_) {
+    return { ok: false, text: "" };
+  }
+}
+
+async function writeClipboardText(text) {
+  try {
+    if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") return false;
+    await navigator.clipboard.writeText(String(text ?? ""));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function clickStylesCopyButton(button) {
+  return new Promise((resolve) => {
+    let captured = "";
+    const onCopy = (event) => {
+      try {
+        const data = event.clipboardData && event.clipboardData.getData("text/plain");
+        if (data) captured = String(data);
+      } catch (_) {
+        /* the page may use the async clipboard API instead */
+      }
+    };
+    document.addEventListener("copy", onCopy, true);
+    button.click();
+    setTimeout(() => {
+      document.removeEventListener("copy", onCopy, true);
+      resolve(captured.trim());
+    }, 80);
+  });
+}
+
+// Show more first, then the Styles copy button. The lyrics copy button is never
+// clicked. The previous clipboard is written back when it could be read.
+async function readFullStyles(track, log) {
+  const panel = songPanelRoot(track.title);
+  if (!panel) return "";
+  await ensureStylesExpanded(panel, log);
+  if (stopRequested) return "";
+  const current = songPanelRoot(track.title) || panel;
+  const button = findStylesCopyButton(current);
+  if (!button) return readStylesBesideCopyButton(current);
+  const prior = await readClipboardText();
+  const fromEvent = await clickStylesCopyButton(button);
+  let changed = "";
+  for (let attempt = 0; attempt < 5 && !stopRequested; attempt += 1) {
+    const after = await readClipboardText();
+    if (after.ok && (!prior.ok || after.text !== prior.text)) {
+      changed = after.text.trim();
+      break;
+    }
+    await sleep(80);
+  }
+  if (prior.ok) {
+    const restored = await writeClipboardText(prior.text);
+    if (!restored) log("  could not restore the clipboard");
+  } else {
+    log("  could not read the previous clipboard, so it was not restored");
+  }
+  const styles = (changed || fromEvent).trim();
+  if (styles) return styles;
+  log("  styles clipboard was empty — using the expanded styles text");
+  return readStylesBesideCopyButton(songPanelRoot(track.title) || current);
+}
+
+async function saveLyricsFile(track, filename, log, opts) {
+  if (!panelShowsTitle(track.title)) {
+    log(`  song panel is not showing "${track.title}" — not saving lyrics`);
+    return false;
+  }
+  let styles = "";
+  if (!stopRequested) {
+    try {
+      styles = await readFullStyles(track, log);
+    } catch (err) {
+      log(`  ! styles were not copied: ${err && err.message ? err.message : err}`);
+      styles = "";
+    }
+  }
+  if (stopRequested) return false;
   const lyrics = await waitForLyricsText(track, log);
   if (stopRequested) return false;
-  if (!lyrics) {
-    log(`  no lyrics for "${track.title}" — skipped text file`);
+  if (!panelShowsTitle(track.title)) {
+    log(`  song panel is not showing "${track.title}" — not saving lyrics`);
+    return false;
+  }
+  const text =
+    typeof composeSidecarText === "function" ? composeSidecarText(styles, lyrics) : String(lyrics || "").trim();
+  // visit:true must not suppress the write. Only an existing txt sets download false.
+  if (opts && opts.download === false) {
+    log("  lyrics already saved — not downloading");
+    return false;
+  }
+  if (!text) {
+    log(`  no lyrics or styles for "${track.title}" — skipped text file`);
     return false;
   }
   const response = await chrome.runtime.sendMessage({
@@ -1500,7 +1806,7 @@ async function saveLyricsFile(track, filename, log) {
     type: "saveSidecar",
     filename,
     extension: "txt",
-    text: lyrics,
+    text,
   });
   if (!response || !response.ok) {
     log(`  ! lyrics save failed: ${response && response.error ? response.error : "unknown"}`);
@@ -1554,14 +1860,30 @@ function insidePlayControl(el) {
   return Boolean(parseRowLabel(button.getAttribute("aria-label") || ""));
 }
 
+// Colons and parentheses stay part of the title. titleKey maps ":" to the
+// filename lookalike on both sides, so "Track: Name (Part)" still matches.
+function textMatchesTitle(text, title) {
+  const wanted = titleKey(title);
+  if (!wanted || !text) return false;
+  const pieces = [String(text)];
+  for (const line of String(text).split(/\n/)) pieces.push(line);
+  for (const piece of pieces) {
+    const flat = piece.replace(/\s+/g, " ").trim();
+    if (!flat) continue;
+    const keyed = titleKey(flat);
+    if (!keyed) continue;
+    if (keyed === wanted) return true;
+    if (keyed.startsWith(wanted) && (keyed.length === wanted.length || keyed[wanted.length] === " ")) return true;
+  }
+  return false;
+}
+
 function titleClickTarget(row, title) {
   if (!row || typeof row.querySelectorAll !== "function") return null;
-  const wanted = titleKey(title);
   const candidates = [];
   for (const el of row.querySelectorAll("a, span, p, h1, h2, h3, h4, div")) {
     if (isRowPlayButton(el) || insidePlayControl(el)) continue;
-    const text = (el.innerText || "").replace(/\s+/g, " ").trim();
-    if (!text || titleKey(text) !== wanted) continue;
+    if (!textMatchesTitle(el.innerText || "", title)) continue;
     if (!isShown(el)) continue;
     const rect = el.getBoundingClientRect();
     if (rect.width < 8 || rect.height < 8) continue;
@@ -1569,6 +1891,29 @@ function titleClickTarget(row, title) {
   }
   candidates.sort((a, b) => a.area - b.area);
   return candidates.length ? candidates[0].el : null;
+}
+
+function rowBodyClickTarget(row) {
+  if (!row || isRowPlayButton(row) || insidePlayControl(row)) return null;
+  if (!isShown(row)) return null;
+  const rect = row.getBoundingClientRect();
+  if (rect.width < 8 || rect.height < 8) return null;
+  return row;
+}
+
+// Prefer the title text. If that node is missing, click the row body — never Play.
+function clickTargetForSongRow(button, title) {
+  const row = panelRow(button) || (button && button.parentElement);
+  let node = row;
+  for (let depth = 0; depth < 8 && node; depth += 1) {
+    if (depth > 0 && elementContainsLibraryList(node)) break;
+    if (!isRowPlayButton(node) && !insidePlayControl(node)) {
+      const match = titleClickTarget(node, title);
+      if (match) return match;
+    }
+    node = node.parentElement;
+  }
+  return rowBodyClickTarget(row);
 }
 
 function clickElement(el) {
@@ -1590,32 +1935,167 @@ async function waitForSongPanel(title, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (!stopRequested && Date.now() < deadline) {
     if (panelShowsTitle(title)) return true;
-    await sleep(200);
+    await sleep(PANEL_OPEN_POLL_MS);
   }
   return !stopRequested && panelShowsTitle(title);
 }
 
-async function findButtonForPanel(title, log) {
-  const visible = findVisibleButtonByTitle(title);
-  if (visible) return visible;
+let lastLibraryAnchor = 0;
+
+function rememberLibraryAnchor() {
   const library = libraryScrollRoot();
-  if (!library || stopRequested) return null;
-  log(`  looking for "${title}" to open its panel`);
-  const fold = foldTitleKey(title);
-  const max = Math.max(0, library.scrollHeight - library.clientHeight);
-  const remembered = sidecarListOffset.get(fold);
-  const origin = typeof remembered === "number" ? Math.min(max, Math.max(0, remembered)) : library.scrollTop;
-  const step = Math.max(180, Math.floor((library.clientHeight || 480) * 0.75));
-  const tops = [origin];
-  for (let i = 1; i <= 3; i += 1) tops.push(origin + step * i, origin - step * i);
-  for (const top of tops) {
-    if (stopRequested) return null;
-    library.scrollTop = Math.min(max, Math.max(0, top));
-    await sleep(160);
-    const found = findVisibleButtonByTitle(title);
-    if (found) return found;
+  if (library) lastLibraryAnchor = library.scrollTop;
+}
+
+function topmostVisibleLibraryRow() {
+  let best = null;
+  let bestTop = Infinity;
+  for (const row of collectVisibleRows()) {
+    if (!row.button || typeof row.button.getBoundingClientRect !== "function") continue;
+    const rect = row.button.getBoundingClientRect();
+    if (rect.width < 8 || rect.height < 8) continue;
+    if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+    if (rect.top < bestTop) {
+      bestTop = rect.top;
+      best = row;
+    }
   }
+  return best;
+}
+
+// The virtualized library ignores later row lookups until a song title has been
+// clicked. Click the topmost visible title, never its Play button, and never
+// scrollIntoView (that clips page 1).
+async function selectFirstLibrarySong(log) {
+  const row = topmostVisibleLibraryRow();
+  if (!row) {
+    log("Could not select the first library song.");
+    return false;
+  }
+  const target = clickTargetForSongRow(row.button, row.title);
+  if (!target) {
+    log("Could not select the first library song.");
+    return false;
+  }
+  log("Selecting the first library song.");
+  clickElement(target);
+  rememberLibraryAnchor();
+  await sleep(250);
+  return true;
+}
+
+function rowIntersectsViewport(button) {
+  if (!button || typeof button.getBoundingClientRect !== "function") return false;
+  const rect = button.getBoundingClientRect();
+  return rect.width >= 8 && rect.height >= 8 && rect.bottom > 0 && rect.top < window.innerHeight;
+}
+
+function buttonInLibraryViewport(title) {
+  const button = findVisibleButtonByTitle(title);
+  if (!button || !rowIntersectsViewport(button)) return null;
+  return button;
+}
+
+function librarySignatureShares(left, right) {
+  if (!left || !right) return false;
+  const keys = new Set(left.split("\n"));
+  return right.split("\n").some((key) => key && keys.has(key));
+}
+
+async function waitForLibraryRow(title, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let found = buttonInLibraryViewport(title);
+  while (!found && !stopRequested && Date.now() < deadline) {
+    await sleep(PANEL_OPEN_POLL_MS);
+    found = buttonInLibraryViewport(title);
+  }
+  return found;
+}
+
+// One viewport on the library scroll parent. Not scrollIntoView.
+function nudgeLibraryScroll(scroller, direction) {
+  if (!scroller) return false;
+  const before = scroller.scrollTop;
+  const step = Math.max(1, scroller.clientHeight || 0);
+  const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  const next = direction === "up" ? Math.max(0, before - step) : Math.min(max, before + step);
+  if (next - before < 2 && before - next < 2) return false;
+  scroller.scrollTop = next;
+  return Math.abs(scroller.scrollTop - before) >= 2;
+}
+
+async function findButtonForPanel(title, log) {
+  const visible = buttonInLibraryViewport(title);
+  if (visible) {
+    rememberLibraryAnchor();
+    return visible;
+  }
+  if (stopRequested) return null;
+  log(`  looking for "${title}" to open its panel`);
+  const found = await revealLibraryRow(title, log);
+  if (found) {
+    rememberLibraryAnchor();
+    return found;
+  }
+  if (!stopRequested) log(`  missed "${title}" — continuing with the next song`);
   return null;
+}
+
+// Page Down with the library list focused. If that key does not change the list's
+// scrollTop, step the same scroller one viewport. If that page skips the row, Page Up once.
+// A few attempts that mount nothing fail this song only.
+async function revealLibraryRow(title, log) {
+  const ATTEMPT_CAP = 6;
+  const STABLE_LIMIT = 3;
+  let previous = visibleLibrarySignature();
+  let stable = 0;
+  for (let i = 0; i < ATTEMPT_CAP && !stopRequested; i += 1) {
+    const already = buttonInLibraryViewport(title);
+    if (already) return already;
+    let scroller = focusLibraryScroller();
+    const beforeTop = scroller ? scroller.scrollTop : 0;
+    const beforeSig = visibleLibrarySignature();
+    const keyed = await pressLibraryKey("PageDown", log);
+    let found = await waitForLibraryRow(title, 800);
+    if (found) return found;
+    scroller = libraryListScroller() || scroller;
+    const afterKeyTop = scroller ? scroller.scrollTop : beforeTop;
+    const afterKeySig = visibleLibrarySignature();
+    const keyMoved = Boolean(scroller) && Math.abs(afterKeyTop - beforeTop) >= 2;
+    const rowsChanged = afterKeySig !== beforeSig;
+    if (rowsChanged && beforeSig && !librarySignatureShares(beforeSig, afterKeySig)) {
+      log("  Page Down passed the row. Pressing Page Up.");
+      const upBefore = scroller ? scroller.scrollTop : 0;
+      if (keyed) await pressLibraryKey("PageUp", log);
+      found = await waitForLibraryRow(title, 800);
+      if (found) return found;
+      scroller = libraryListScroller() || scroller;
+      if (scroller && Math.abs(scroller.scrollTop - upBefore) < 2 && nudgeLibraryScroll(scroller, "up")) {
+        found = await waitForLibraryRow(title, 800);
+        if (found) return found;
+      }
+    } else if (!keyMoved && !rowsChanged) {
+      log("  Page Down did not move the library. Scrolling the list one viewport.");
+      if (nudgeLibraryScroll(scroller, "down")) found = await waitForLibraryRow(title, 800);
+      if (found) return found;
+      const nudgedSig = visibleLibrarySignature();
+      if (nudgedSig !== beforeSig && beforeSig && !librarySignatureShares(beforeSig, nudgedSig)) {
+        log("  Page Down passed the row. Pressing Page Up.");
+        if (nudgeLibraryScroll(scroller, "up")) found = await waitForLibraryRow(title, 800);
+        if (found) return found;
+      }
+    }
+    const signature = visibleLibrarySignature();
+    const topNow = scroller ? scroller.scrollTop : beforeTop;
+    if (signature === previous && Math.abs(topNow - beforeTop) < 2) {
+      stable += 1;
+      if (stable >= STABLE_LIMIT) return null;
+    } else {
+      stable = 0;
+      previous = signature;
+    }
+  }
+  return buttonInLibraryViewport(title);
 }
 
 function playbarTitleElement() {
@@ -1640,41 +2120,31 @@ async function openSongPanel(title, log, opts) {
   const allowLibraryScroll = !opts || opts.allowLibraryScroll !== false;
   const button = allowLibraryScroll ? await findButtonForPanel(title, log) : findVisibleButtonByTitle(title);
   if (stopRequested) return false;
-  let clicked = false;
   if (button) {
-    const row = panelRow(button);
-    const target = titleClickTarget(row, title);
+    const target = clickTargetForSongRow(button, title);
     if (target) {
       log(`  opening song panel for "${title}"`);
       clickElement(target);
-      clicked = true;
     }
-  }
-  if (!clicked && !allowLibraryScroll) {
+  } else if (!allowLibraryScroll) {
     const bar = readPlaybarTrack();
     const el = playbarTitleElement();
     if (bar.title && titleKey(bar.title) === titleKey(title) && el) {
       log(`  opening song panel from the play bar for "${title}"`);
       clickElement(el);
-      clicked = true;
     }
   }
-  if (!clicked) {
-    log(`  song panel did not show "${title}"`);
-    return false;
-  }
-  const opened = await waitForSongPanel(title, 6000);
+  // Previously `if (!clicked) return false` logged "song panel did not show"
+  // and the lyrics loop advanced immediately. Wait out the panel instead.
+  const opened = await waitForSongPanel(title, PANEL_OPEN_WAIT_MS);
   if (!opened) log(`  song panel did not show "${title}"`);
   return opened;
 }
 
 async function ensureSongPanel(title, log, opts) {
-  for (let attempt = 0; attempt < 2 && !stopRequested; attempt += 1) {
-    if (panelShowsTitle(title)) return true;
-    const opened = await openSongPanel(title, log, opts);
-    if (opened) return true;
-  }
-  return !stopRequested && panelShowsTitle(title);
+  if (stopRequested) return false;
+  if (panelShowsTitle(title)) return true;
+  return openSongPanel(title, log, opts);
 }
 
 function playbackSnapshot() {
@@ -1735,48 +2205,76 @@ async function resolveSidecarPlan(filename, log, opts) {
 
 async function saveLyricsAndCover(track, filename, log, coverSrc, opts) {
   const plan = await resolveSidecarPlan(filename, log, opts);
-  if (!plan) return;
-  const saveLyrics = Boolean(plan.saveLyrics);
-  const saveCover = Boolean(plan.saveCover);
-  if (!saveLyrics && !saveCover) {
+  if (!plan) return { failed: true };
+  const downloadLyrics = Boolean(plan.saveLyrics);
+  const downloadCover = Boolean(plan.saveCover);
+  const visit = Boolean(opts && opts.visit);
+  if (!downloadLyrics && !downloadCover && !visit) {
     log(`  lyrics and cover already saved for "${track.title}"`);
-    return;
+    return { failed: false, skippedDownload: true };
   }
 
   const allowLibraryScroll = !opts || opts.allowLibraryScroll !== false;
   const snapshot = playbackSnapshot();
-  const needPanel = saveLyrics || (saveCover && !coverSrc);
+  const shouldOpen = visit || downloadLyrics || downloadCover;
+  let downloaded = false;
+  let openFailed = false;
   try {
-    if (needPanel && !panelShowsTitle(track.title)) {
+    if (shouldOpen && !panelShowsTitle(track.title)) {
       const opened = await ensureSongPanel(track.title, log, { allowLibraryScroll });
-      if (!opened || stopRequested) return;
-    }
-    if (stopRequested) return;
-    if (saveLyrics && !saveCover) log("  cover already saved");
-    if (!saveLyrics && saveCover) log("  lyrics already saved");
-    if (saveLyrics) {
-      try {
-        await saveLyricsFile(track, filename, log);
-      } catch (err) {
-        log(`  ! lyrics save failed: ${err && err.message ? err.message : err}`);
+      if (stopRequested) return { failed: false, skippedDownload: false };
+      if (!opened) {
+        log(`  could not open "${track.title}" — continuing with the next song`);
+        openFailed = true;
       }
     }
-    if (stopRequested || !saveCover) return;
+    if (stopRequested) return { failed: false, skippedDownload: false };
+    if (!downloadLyrics && !downloadCover) log(`  lyrics and cover already saved for "${track.title}" — not downloading`);
+    else if (downloadLyrics && !downloadCover) log("  cover already saved — downloading lyrics");
+    else if (!downloadLyrics && downloadCover) log("  lyrics already saved — downloading cover");
+
+    if (visit || downloadLyrics) {
+      if (!panelShowsTitle(track.title)) {
+        if (downloadLyrics) log(`  not saving lyrics — panel is not showing "${track.title}"`);
+      } else {
+        try {
+          const wrote = await saveLyricsFile(track, filename, log, { download: downloadLyrics });
+          if (wrote) downloaded = true;
+        } catch (err) {
+          log(`  ! lyrics save failed: ${err && err.message ? err.message : err}`);
+        }
+      }
+    }
+    if (stopRequested) return { failed: false, skippedDownload: false };
+    if (!downloadCover) {
+      return {
+        failed: openFailed && downloadLyrics && !downloaded,
+        skippedDownload: !downloadLyrics && !downloadCover,
+      };
+    }
 
     const image = findCoverImage(track);
     const src = (image ? image.currentSrc || image.src : "") || coverSrc || "";
     if (!src) {
       log(`  no cover image for "${track.title}"`);
-      return;
+      return {
+        failed: openFailed && downloadLyrics && !downloaded,
+        skippedDownload: false,
+      };
     }
     try {
-      await saveCoverFromSrc(src, filename, log);
+      const wroteCover = await saveCoverFromSrc(src, filename, log);
+      if (wroteCover) downloaded = true;
     } catch (err) {
       log(`  ! cover save failed: ${err && err.message ? err.message : err}`);
     }
   } finally {
-    if (needPanel) await restorePlayback(snapshot, log, allowLibraryScroll);
+    if (shouldOpen) await restorePlayback(snapshot, log, allowLibraryScroll);
   }
+  return {
+    failed: openFailed && (downloadLyrics || downloadCover) && !downloaded,
+    skippedDownload: !downloadLyrics && !downloadCover,
+  };
 }
 
 function rowOfButton(button) {
@@ -1836,6 +2334,7 @@ async function discoverSidecars(log) {
 }
 
 async function runLyricsAndCovers(log) {
+  stylesExpandedThisPass = false;
   try {
   if (!location.pathname.startsWith("/me")) {
     log("Open suno.com/me — lyrics and covers are read from your library.");
@@ -1874,10 +2373,9 @@ async function runLyricsAndCovers(log) {
     return;
   }
 
-  // A WAV on the recorded-song list is not lyrics or a cover. Skip a song only
-  // when its lyric file and cover file are already in the save folder. A cover
-  // without a lyric file still opens the panel. Duplicate names in this run
-  // are handled once.
+  // A WAV on the recorded-song list is not lyrics or a cover. An existing
+  // lyric file or cover skips that download only. The song is still opened.
+  // Duplicate names in this run are handled once.
   const seen = new Set();
   const results = [];
   const startedAt = Date.now();
@@ -1890,8 +2388,19 @@ async function runLyricsAndCovers(log) {
     startedAt,
   });
 
+  if (!stopRequested) {
+    await returnLibraryToTop(log);
+    if (!stopRequested) await selectFirstLibrarySong(log);
+  }
+
   for (let i = 0; i < items.length; i++) {
-    const current = await getState();
+    let current = null;
+    try {
+      current = await getState();
+    } catch (err) {
+      log(`  ! could not read session state, continuing: ${err && err.message ? err.message : err}`);
+      current = { status: "capturing" };
+    }
     if (stopRequested || !current || current.status === "idle") {
       log("Lyrics and covers stopped.");
       break;
@@ -1909,29 +2418,34 @@ async function runLyricsAndCovers(log) {
       typeof planSidecarSave === "function"
         ? planSidecarSave(sidecarFiles, filename)
         : { skipSong: false, saveLyrics: true, saveCover: true, hasLyrics: false, hasCover: false };
-    if (plan.skipSong) {
-      log(`Skipping (lyrics and cover already saved): ${item.title}`);
-      results.push({ title: item.title, done: true, failed: false, skipped: true });
-      continue;
+
+    log(`Lyrics and cover (${i + 1}/${items.length}): ${item.title}`);
+    try {
+      await setState({
+        status: "capturing",
+        mode: "meta",
+        queue: results,
+        currentIndex: i,
+        currentTitle: item.title,
+        discoveredTotal,
+        startedAt,
+      });
+    } catch (err) {
+      log(`  ! could not update session state, continuing: ${err && err.message ? err.message : err}`);
     }
 
-    log(`Lyrics and cover (${results.length + 1}/${items.length}): ${item.title}`);
-    await setState({
-      status: "capturing",
-      mode: "meta",
-      queue: results,
-      currentIndex: i,
-      currentTitle: item.title,
-      discoveredTotal,
-      startedAt,
-    });
-
     try {
-      await saveLyricsAndCover({ title: item.title, id: "" }, filename, log, item.coverSrc, {
+      const outcome = await saveLyricsAndCover({ title: item.title, id: "" }, filename, log, item.coverSrc, {
         allowLibraryScroll: true,
         plan,
+        visit: true,
       });
-      results.push({ title: item.title, done: true, failed: false });
+      results.push({
+        title: item.title,
+        done: true,
+        failed: Boolean(outcome && outcome.failed),
+        skipped: Boolean(outcome && outcome.skippedDownload && !outcome.failed),
+      });
     } catch (err) {
       log(`  ! error saving lyrics/cover for "${item.title}": ${err && err.message ? err.message : err}`);
       results.push({ title: item.title, done: true, failed: true });
@@ -1947,14 +2461,13 @@ async function runLyricsAndCovers(log) {
   });
   const saved = results.filter((entry) => entry.done && !entry.failed && !entry.skipped).length;
   const skipped = results.filter((entry) => entry.skipped).length;
-  log(`Lyrics and covers finished — ${saved} saved, ${skipped} skipped, ${discoveredTotal} found.`);
+  const failed = results.filter((entry) => entry.failed).length;
+  log(`Lyrics and covers finished — ${saved} saved, ${skipped} skipped, ${failed} failed, ${discoveredTotal} found.`);
   } finally {
-    if (location.pathname.startsWith("/me")) {
-      try {
-        await scrollLibraryToTop();
-      } catch (_) {
-        /* the list scroller may already be gone */
-      }
+    try {
+      await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+    } catch (_) {
+      /* debugger already detached, or the worker is gone */
     }
   }
 }
@@ -2224,15 +2737,11 @@ async function runCaptureSession(log) {
     startedAt,
   });
 
+  if (!stopRequested) await returnLibraryToTop(log);
+
   for (let i = 0; i < titles.length; i++) {
     const title = titles[i];
     const key = titleKey(title);
-
-    if (options.skipCaptured !== false && alreadyDone.has(key)) {
-      log(`Skipping (already captured): ${title}`);
-      results.push({ title, done: true, failed: false, skipped: true });
-      continue;
-    }
 
     const current = await getState();
     if (stopRequested || !current || current.status === "idle") {
@@ -2240,7 +2749,13 @@ async function runCaptureSession(log) {
       break;
     }
 
-    log(`Playing (${i + 1}/${titles.length}): ${title}`);
+    const wavAlreadySaved = options.skipCaptured !== false && alreadyDone.has(key);
+    log(
+      wavAlreadySaved
+        ? `Opening (${i + 1}/${titles.length}): ${title}`
+        : `Playing (${i + 1}/${titles.length}): ${title}`
+    );
+    if (wavAlreadySaved) log("  WAV already saved — not downloading");
     await setState({
       status: "capturing",
       queue: results,
@@ -2249,6 +2764,38 @@ async function runCaptureSession(log) {
       discoveredTotal,
       startedAt,
     });
+
+    if (wavAlreadySaved) {
+      const filename = buildRelativePath(options.saveFolder, options.filenamePrefix || "", title);
+      try {
+        const outcome = await saveLyricsAndCover({ title, id: "" }, filename, log, "", {
+          allowLibraryScroll: true,
+          visit: true,
+        });
+        results.push({
+          title,
+          done: true,
+          failed: Boolean(outcome && outcome.failed),
+          skipped: Boolean(outcome && outcome.skippedDownload && !outcome.failed),
+        });
+      } catch (err) {
+        log(`  ! error opening "${title}": ${err && err.message ? err.message : err}`);
+        results.push({ title, done: true, failed: true });
+      }
+      if (stopRequested) {
+        log("Capture stopped.");
+        break;
+      }
+      await setState({
+        status: "capturing",
+        queue: results,
+        currentIndex: i,
+        discoveredTotal,
+        startedAt,
+      });
+      await sleep(800);
+      continue;
+    }
 
     let success = false;
     try {
@@ -2292,8 +2839,9 @@ async function runCaptureSession(log) {
   await setState({ status: "idle", queue: results, finishedAt: Date.now(), discoveredTotal });
   await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
   const ok = results.filter((t) => t.done && !t.failed && !t.skipped).length;
+  const skipped = results.filter((t) => t.skipped).length;
   const failed = results.filter((t) => t.failed).length;
-  log(`Capture session complete — ${ok} saved, ${failed} failed, ${discoveredTotal} discovered.`);
+  log(`Capture session complete — ${ok} saved, ${skipped} not re-downloaded, ${failed} failed, ${discoveredTotal} discovered.`);
 }
 
 function log(message) {
