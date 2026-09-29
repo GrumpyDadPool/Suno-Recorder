@@ -70,6 +70,13 @@ async function handleMessage(message) {
       return { ok: true };
     case "hasStream":
       return { ok: true, hasStream: Boolean(persistentStream) };
+    case "stageBlob": {
+      const blob = blobFromStageMessage(message);
+      return { ok: true, objectUrl: URL.createObjectURL(blob) };
+    }
+    case "revokeBlob":
+      if (message.objectUrl) URL.revokeObjectURL(message.objectUrl);
+      return { ok: true };
     default:
       return { ok: false, error: `Unknown message type: ${message.type}` };
   }
@@ -279,6 +286,26 @@ function audioBufferToWavBlob(audioBuffer) {
   }
 
   return new Blob([buffer], { type: "audio/wav" });
+}
+
+function blobFromStageMessage(message) {
+  const mimeType = message.mimeType || "application/octet-stream";
+  if (typeof message.text === "string") {
+    return new Blob([message.text], { type: mimeType });
+  }
+  const raw = message.buffer;
+  let bytes = null;
+  if (raw instanceof ArrayBuffer) bytes = new Uint8Array(raw);
+  else if (ArrayBuffer.isView(raw)) bytes = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+  else if (raw && typeof raw === "object") {
+    const keys = Object.keys(raw);
+    if (keys.length && keys.every((key) => /^\d+$/.test(key))) {
+      bytes = new Uint8Array(keys.length);
+      for (const key of keys) bytes[Number(key)] = raw[key] & 0xff;
+    }
+  }
+  if (!bytes || !bytes.byteLength) throw new Error("stageBlob received no bytes");
+  return new Blob([bytes], { type: mimeType });
 }
 
 async function sendSavePayload(filename, blob, mimeType, extension) {
