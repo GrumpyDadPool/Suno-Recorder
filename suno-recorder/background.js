@@ -140,7 +140,15 @@ async function handleMessage(message, sender) {
       if (!tabId) {
         throw new Error("startSession message had no tabId — can't capture");
       }
+      // Chrome discards an unused tabCapture stream id after about 10 seconds
+      // ("expires after a few seconds" in the tabCapture docs). Taking the id
+      // and only then creating the offscreen document burned that window, so
+      // getUserMedia failed and One song died while the popup was already
+      // asking for a song. The document must be listening first; the id is
+      // taken immediately before it is consumed.
       await closeOffscreenDocumentIfExists();
+      await ensureOffscreenDocument();
+      await sendToOffscreenWithRetry({ target: "offscreen", type: "ping" });
       let streamId;
       try {
         streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
@@ -150,7 +158,6 @@ async function handleMessage(message, sender) {
             "Click the extension icon on a suno.com tab and try again."
         );
       }
-      await ensureOffscreenDocument();
       const options = await getOptions();
       const init = await sendToOffscreenWithRetry({
         target: "offscreen",
@@ -250,6 +257,35 @@ async function handleMessage(message, sender) {
       return { ok: true, extension };
     }
 
+    case "saveSidecar": {
+      const extension = String(message.extension || "").toLowerCase().replace(/^\./, "");
+      if (!["txt", "jpg", "png", "webp"].includes(extension)) {
+        throw new Error(`Unsupported sidecar type: ${extension}`);
+      }
+      const filename = assertSafeRelativeFilename(message.filename);
+      let bytes = null;
+      let mime = "application/octet-stream";
+      if (extension === "txt") {
+        const text = String(message.text || "");
+        if (!text.trim()) throw new Error("Refusing to write an empty lyrics file");
+        bytes = new TextEncoder().encode(text);
+        mime = "text/plain;charset=utf-8";
+      } else {
+        bytes = coerceToUint8Array(message.buffer);
+        if (!bytes || !bytes.byteLength) throw new Error("Cover image was empty");
+        if (bytes.byteLength > 8_000_000) throw new Error("Cover image is too large");
+        mime = message.mimeType || "application/octet-stream";
+      }
+      const blob = new Blob([bytes], { type: mime });
+      const ownedObjectUrl = URL.createObjectURL(blob);
+      try {
+        await downloadRelativeFile(ownedObjectUrl, filename, extension);
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(ownedObjectUrl), 60_000);
+      }
+      return { ok: true, extension };
+    }
+
     case "reportError": {
       await chrome.storage.local.set({
         sunoCaptureError: message.message,
@@ -290,6 +326,31 @@ async function handleMessage(message, sender) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function assertSafeRelativeFilename(filename) {
+  const value = String(filename || "").replace(/\\/g, "/");
+  if (!value || value.startsWith("/") || value.includes("\0") || /^[A-Za-z]:/.test(value)) {
+    throw new Error("Refusing a download path outside the save folder");
+  }
+  const parts = value.split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) {
+    throw new Error("Refusing a download path outside the save folder");
+  }
+  return value;
+}
+
+async function downloadRelativeFile(url, filename, extension) {
+  const downloadId = await chrome.downloads.download({
+    url,
+    filename: `${assertSafeRelativeFilename(filename)}.${extension}`,
+    saveAs: false,
+    conflictAction: "uniquify",
+  });
+  if (downloadId === undefined) {
+    throw new Error("chrome.downloads.download returned no id");
+  }
+  await waitForDownloadSettle(downloadId, 45_000);
 }
 
 function waitForDownloadSettle(downloadId, timeoutMs) {
@@ -344,7 +405,9 @@ async function sendToOffscreenWithRetry(message, attempts = 8) {
     if (!(await offscreenDocumentExists())) {
       await ensureOffscreenDocument();
     }
-    await delay(50 + i * 40);
+    // First try is immediate so a fresh tabCapture stream id is consumed
+    // inside Chrome's ~10s expiry. Later tries only wait after a miss.
+    if (i > 0) await delay(40 * i);
     try {
       const response = await chrome.runtime.sendMessage(message);
       if (response) return response;

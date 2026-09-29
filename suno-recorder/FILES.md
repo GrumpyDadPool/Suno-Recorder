@@ -12,6 +12,8 @@ Anything outside this folder is not needed for the extension to run.
 | `background.js` | Service worker: tabCapture, downloads, offscreen relay |
 | `content.js` | Runs on `suno.com` — library scan + play control |
 | `title_utils.js` | Shared title → filename sanitizer (loaded before content.js) |
+| `sidecar_utils.js` | Lyrics text and cover-URL checks (loaded before content.js) |
+| `recorded_log.js` | Recorded-song list used for skip-done (loaded before content.js) |
 | `offscreen.html` | Host page for the offscreen recorder document |
 | `offscreen.js` | MediaRecorder + WAV encode |
 | `popup.html` | Toolbar popup UI |
@@ -34,6 +36,8 @@ Anything outside this folder is not needed for the extension to run.
 | `README.md` | Human docs only |
 | `FILES.md` | This manifesto |
 | `test_title_utils.js` | Node unit check (`node test_title_utils.js`); not loaded by Chrome |
+| `test_recorded_log.js` | Node unit check (`node test_recorded_log.js`); not loaded by Chrome |
+| `test_sidecar_utils.js` | Node unit check (`node test_sidecar_utils.js`); not loaded by Chrome |
 
 ## Repo root (next to `suno-recorder/`)
 

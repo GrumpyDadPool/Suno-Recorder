@@ -6,13 +6,13 @@ track-by-track and saves each song as a **WAV** file to Chrome’s download fold
 Uses Chrome **tab audio capture** — no Suno download quota, no Playwright, no
 system-wide loopback. Only that tab’s audio is recorded.
 
-**Repo:** [GrumpyDadPool/Suno-Recorder](https://github.com/GrumpyDadPool/Suno-Recorder)
+**Repo:** this project’s Git remote (no personal account is hardcoded here).
 
 ## Install (unpacked)
 
 1. Clone this repo:
    ```bash
-   git clone https://github.com/GrumpyDadPool/Suno-Recorder.git
+   git clone <your-remote-url>
    cd Suno-Recorder
    ```
 2. Open `chrome://extensions`
@@ -73,7 +73,7 @@ Suno-Recorder/
 ├── .gitignore
 └── suno-recorder/            ← Load unpacked this folder
     ├── FILES.md              ← required-file manifesto
-    ├── manifest.json         ← v1.3.0
+    ├── manifest.json         ← v1.4.0
     ├── background.js
     ├── content.js
     ├── title_utils.js
