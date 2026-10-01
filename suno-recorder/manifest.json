@@ -11,7 +11,13 @@
   "content_scripts": [
     {
       "matches": ["https://suno.com/*"],
-      "js": ["title_utils.js", "recorded_log.js", "sidecar_utils.js", "content.js"],
+      "js": [
+        "title_utils.js",
+        "recorded_log.js",
+        "sidecar_utils.js",
+        "playbar_transport_picker.js",
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],

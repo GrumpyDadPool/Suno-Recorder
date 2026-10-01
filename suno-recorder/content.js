@@ -1039,20 +1039,20 @@ function buttonShowsPause(btn) {
   return rects.length >= 2;
 }
 
-// Bottom transport only. Row controls are `Play "Title"` / `Pause "Title"` and
-// do not say Playbar. Skip, next, and the title link are not the play control.
-function findPlaybarTransportButton() {
+function playbarTransportButtonMatches(btn) {
+  const label = (btn.getAttribute("aria-label") || "").toLowerCase();
+  if (/\b(skip|next|previous|prev|title|shuffle|repeat|volume|queue|like|share)\b/.test(label)) return false;
+  return /\b(play|pause)\b/.test(label);
+}
+
+function collectPlaybarTransportButtons() {
   const buttons = Array.from(document.querySelectorAll("button[aria-label]"));
-  const matches = buttons.filter((btn) => {
+  const labelled = buttons.filter((btn) => {
     const label = (btn.getAttribute("aria-label") || "").toLowerCase();
     if (!label.includes("playbar")) return false;
-    if (/\b(skip|next|previous|prev|title|shuffle|repeat|volume|queue|like|share)\b/.test(label)) return false;
-    return /\b(play|pause)\b/.test(label);
+    return playbarTransportButtonMatches(btn);
   });
-  const labelled =
-    matches.find((btn) => (btn.getAttribute("aria-label") || "").toLowerCase().includes("pause")) ||
-    matches[0];
-  if (labelled) return labelled;
+  if (labelled.length) return labelled;
 
   // Queued / paused transport sometimes omits the word "Playbar" on the
   // play control itself. Stay inside the title's bar so a library row is not clicked.
@@ -1061,20 +1061,27 @@ function findPlaybarTransportButton() {
   for (let depth = 0; depth < 6 && scope; depth += 1) {
     const rect = scope.getBoundingClientRect();
     if (rect.height > 240) break;
-    const local = Array.from(scope.querySelectorAll("button[aria-label]")).filter((btn) => {
-      const label = (btn.getAttribute("aria-label") || "").toLowerCase();
-      if (/\b(skip|next|previous|prev|shuffle|repeat|volume|queue|like|share|title)\b/.test(label)) return false;
-      return /\b(play|pause)\b/.test(label);
-    });
-    if (local.length) {
-      return (
-        local.find((btn) => (btn.getAttribute("aria-label") || "").toLowerCase().includes("pause")) ||
-        local[0]
-      );
-    }
+    const local = Array.from(scope.querySelectorAll("button[aria-label]")).filter(playbarTransportButtonMatches);
+    if (local.length) return local;
     scope = scope.parentElement;
   }
-  return null;
+  return [];
+}
+
+// Bottom transport only. Row controls are `Play "Title"` / `Pause "Title"` and
+// do not say Playbar. Skip, next, and the title link are not the play control.
+function findPlaybarTransportButton(opts) {
+  const preferPause = opts && Object.prototype.hasOwnProperty.call(opts, "preferPause") ? opts.preferPause : undefined;
+  return pickPlaybarTransportButton(collectPlaybarTransportButtons(), preferPause, {
+    isShown,
+    buttonShowsPause,
+  });
+}
+
+function playbarMediaIsPaused() {
+  const media = getMediaElements();
+  if (!media.length) return false;
+  return media.every((m) => m.paused || m.ended);
 }
 
 function rewindMediaToStart() {
@@ -1215,7 +1222,9 @@ async function waitForPlaybarChange(initial, log) {
 }
 
 async function clickPlaybarPlay(log) {
-  let button = findPlaybarTransportButton();
+  const playingBefore =
+    Boolean(findPlayingMedia()) || isPlaybarPlaying() || buttonShowsPause(findPlaybarTransportButton({ preferPause: true }));
+  let button = findPlaybarTransportButton({ preferPause: playingBefore });
   if (!button) {
     log("  ! play bar play button not found");
     return false;
@@ -1227,15 +1236,33 @@ async function clickPlaybarPlay(log) {
     rewindMediaToStart();
     await sleep(200);
     button = null;
-    for (let attempt = 0; attempt < 15 && !stopRequested; attempt += 1) {
-      const found = findPlaybarTransportButton();
+    for (let attempt = 0; attempt < 30 && !stopRequested; attempt += 1) {
+      const found = findPlaybarTransportButton({ preferPause: false });
       if (found && !buttonShowsPause(found)) {
         button = found;
         break;
       }
+      if (playbarMediaIsPaused() && !isPlaybarPlaying()) {
+        const fallback = findPlaybarTransportButton({ preferPause: false });
+        if (fallback) {
+          button = fallback;
+          break;
+        }
+      }
+      if (attempt === 7 || attempt === 15) {
+        const pauseAgain = findPlaybarTransportButton({ preferPause: true });
+        if (pauseAgain && buttonShowsPause(pauseAgain)) forceClick(pauseAgain);
+      }
       await sleep(200);
     }
-    if (!button || buttonShowsPause(button)) return false;
+    if (!button) {
+      log("  ! play bar play button not found after pausing for restart");
+      return false;
+    }
+    if (buttonShowsPause(button)) {
+      log("  ! play bar still shows pause after pausing — could not arm play for restart");
+      return false;
+    }
   } else {
     rewindMediaToStart();
   }
@@ -1245,15 +1272,16 @@ async function clickPlaybarPlay(log) {
   let retried = false;
   while (Date.now() < deadline) {
     if (stopRequested) return false;
-    const again = findPlaybarTransportButton();
+    const again = findPlaybarTransportButton({ preferPause: true });
     if (isPlaybarPlaying() || findPlayingMedia() || (again && buttonShowsPause(again))) return true;
     if (!retried && Date.now() > deadline - 6000) {
       retried = true;
-      const retry = findPlaybarTransportButton();
+      const retry = findPlaybarTransportButton({ preferPause: false });
       if (retry && !buttonShowsPause(retry)) forceClick(retry);
     }
     await sleep(200);
   }
+  log("  ! play bar playback not confirmed within 8s after clicking play");
   return false;
 }
 
@@ -2534,9 +2562,13 @@ async function recordPlaybarTrack(track, log) {
   }
   const savedAs = (stopResponse && stopResponse.extension) || "wav";
   log(`  saved ${filename}.${savedAs}`);
-  await saveLyricsAndCover(sidecarTrack(track.title, identity), filename, log, "", {
-    allowLibraryScroll: false,
-  });
+  try {
+    await saveLyricsAndCover(sidecarTrack(track.title, identity), filename, log, "", {
+      allowLibraryScroll: false,
+    });
+  } catch (err) {
+    log(`  ! error saving lyrics/cover (audio was saved): ${err && err.message ? err.message : err}`);
+  }
   return true;
 }
 
@@ -2684,9 +2716,13 @@ async function playRowAndWait(title, log) {
   }
   const savedAs = (stopResponse && stopResponse.extension) || "wav";
   log(`  saved ${filename}.${savedAs}`);
-  await saveLyricsAndCover(sidecarTrack(title, libraryIdentity), filename, log, "", {
-    allowLibraryScroll: false,
-  });
+  try {
+    await saveLyricsAndCover(sidecarTrack(title, libraryIdentity), filename, log, "", {
+      allowLibraryScroll: false,
+    });
+  } catch (err) {
+    log(`  ! error saving lyrics/cover (audio was saved): ${err && err.message ? err.message : err}`);
+  }
   return true;
 }
 
