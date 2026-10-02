@@ -1045,15 +1045,7 @@ function playbarTransportButtonMatches(btn) {
   return /\b(play|pause)\b/.test(label);
 }
 
-function collectPlaybarTransportButtons() {
-  const buttons = Array.from(document.querySelectorAll("button[aria-label]"));
-  const labelled = buttons.filter((btn) => {
-    const label = (btn.getAttribute("aria-label") || "").toLowerCase();
-    if (!label.includes("playbar")) return false;
-    return playbarTransportButtonMatches(btn);
-  });
-  if (labelled.length) return labelled;
-
+function collectTitleScopeTransportButtons() {
   // Queued / paused transport sometimes omits the word "Playbar" on the
   // play control itself. Stay inside the title's bar so a library row is not clicked.
   const titleNode = Array.from(document.querySelectorAll('[aria-label*="Playbar: Title"]')).find(isShown);
@@ -1066,6 +1058,21 @@ function collectPlaybarTransportButtons() {
     scope = scope.parentElement;
   }
   return [];
+}
+
+function collectPlaybarTransportButtons() {
+  const buttons = Array.from(document.querySelectorAll("button[aria-label]"));
+  const labelled = buttons.filter((btn) => {
+    const label = (btn.getAttribute("aria-label") || "").toLowerCase();
+    if (!label.includes("playbar")) return false;
+    return playbarTransportButtonMatches(btn);
+  });
+  if (labelled.some(isShown)) return labelled;
+
+  const scoped = collectTitleScopeTransportButtons();
+  if (scoped.some(isShown)) return scoped;
+  if (labelled.length) return labelled;
+  return scoped;
 }
 
 // Bottom transport only. Row controls are `Play "Title"` / `Pause "Title"` and

@@ -137,7 +137,13 @@ async function ensureContentScript(tabId) {
   }
   await chrome.scripting.executeScript({
     target: { tabId },
-    files: ["title_utils.js", "recorded_log.js", "sidecar_utils.js", "content.js"],
+    files: [
+      "title_utils.js",
+      "recorded_log.js",
+      "sidecar_utils.js",
+      "playbar_transport_picker.js",
+      "content.js",
+    ],
   });
 }
 
