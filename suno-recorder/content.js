@@ -944,12 +944,6 @@ function hrefOf(el) {
   return "";
 }
 
-function isShown(el) {
-  if (!el || typeof el.getBoundingClientRect !== "function") return false;
-  const rect = el.getBoundingClientRect();
-  return rect.width > 1 && rect.height > 1 && rect.bottom > 0 && rect.top < window.innerHeight;
-}
-
 function visibleTitleOf(el) {
   if (!el) return "";
   const direct = Array.from(el.childNodes || [])
@@ -1037,42 +1031,6 @@ function buttonShowsPause(btn) {
   if (/\bplay\b/.test(label)) return false;
   const rects = btn.querySelectorAll("svg rect");
   return rects.length >= 2;
-}
-
-function playbarTransportButtonMatches(btn) {
-  const label = (btn.getAttribute("aria-label") || "").toLowerCase();
-  if (/\b(skip|next|previous|prev|title|shuffle|repeat|volume|queue|like|share)\b/.test(label)) return false;
-  return /\b(play|pause)\b/.test(label);
-}
-
-function collectTitleScopeTransportButtons() {
-  // Queued / paused transport sometimes omits the word "Playbar" on the
-  // play control itself. Stay inside the title's bar so a library row is not clicked.
-  const titleNode = Array.from(document.querySelectorAll('[aria-label*="Playbar: Title"]')).find(isShown);
-  let scope = titleNode ? titleNode.parentElement : null;
-  for (let depth = 0; depth < 6 && scope; depth += 1) {
-    const rect = scope.getBoundingClientRect();
-    if (rect.height > 240) break;
-    const local = Array.from(scope.querySelectorAll("button[aria-label]")).filter(playbarTransportButtonMatches);
-    if (local.length) return local;
-    scope = scope.parentElement;
-  }
-  return [];
-}
-
-function collectPlaybarTransportButtons() {
-  const buttons = Array.from(document.querySelectorAll("button[aria-label]"));
-  const labelled = buttons.filter((btn) => {
-    const label = (btn.getAttribute("aria-label") || "").toLowerCase();
-    if (!label.includes("playbar")) return false;
-    return playbarTransportButtonMatches(btn);
-  });
-  if (labelled.some(isShown)) return labelled;
-
-  const scoped = collectTitleScopeTransportButtons();
-  if (scoped.some(isShown)) return scoped;
-  if (labelled.length) return labelled;
-  return scoped;
 }
 
 // Bottom transport only. Row controls are `Play "Title"` / `Pause "Title"` and

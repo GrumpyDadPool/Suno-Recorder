@@ -141,6 +141,7 @@ async function ensureContentScript(tabId) {
       "title_utils.js",
       "recorded_log.js",
       "sidecar_utils.js",
+      "dom_utils.js",
       "playbar_transport_picker.js",
       "content.js",
     ],
