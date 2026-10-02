@@ -632,6 +632,7 @@ function findPlayingMedia() {
 
 function isPlaybarPlaying() {
   return Array.from(document.querySelectorAll("button[aria-label]")).some((btn) => {
+    if (!isShown(btn)) return false;
     const label = (btn.getAttribute("aria-label") || "").toLowerCase();
     if (!label.includes("pause")) return false;
     // Prefer playbar controls; also accept a row that flipped to Pause.
