@@ -1239,7 +1239,7 @@ async function clickPlaybarPlay(log) {
   while (Date.now() < deadline) {
     if (stopRequested) return false;
     const again = findPlaybarTransportButton({ preferPause: true });
-    if (isPlaybarPlaying() || findPlayingMedia() || (again && buttonShowsPause(again))) return true;
+    if (isPlaybarPlaying() || findPlayingMedia() || (again && isShown(again) && buttonShowsPause(again))) return true;
     if (!retried && Date.now() > deadline - 6000) {
       retried = true;
       const retry = findPlaybarTransportButton({ preferPause: false });
