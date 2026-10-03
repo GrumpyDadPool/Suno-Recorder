@@ -11,11 +11,22 @@ function playbarTransportButtonMatches(btn) {
   return /\b(play|pause)\b/.test(label);
 }
 
+function findVisiblePlaybarAnchor(doc, deps) {
+  const documentRef = doc || (typeof document !== "undefined" ? document : null);
+  if (!documentRef) return null;
+  const isShownFn = resolveIsShown(deps);
+  const titleNodes = Array.from(documentRef.querySelectorAll('[aria-label*="Playbar: Title"]'));
+  const title = titleNodes.find(isShownFn);
+  if (title) return title;
+  const links = Array.from(documentRef.querySelectorAll('a[aria-label*="Playbar"][href*="/song/"]'));
+  return links.find(isShownFn) || null;
+}
+
 function collectTitleScopeTransportButtons(doc, deps) {
   const documentRef = doc || (typeof document !== "undefined" ? document : null);
   if (!documentRef) return [];
   const isShownFn = resolveIsShown(deps);
-  const titleNode = Array.from(documentRef.querySelectorAll('[aria-label*="Playbar: Title"]')).find(isShownFn);
+  const titleNode = findVisiblePlaybarAnchor(documentRef, deps);
   let scope = titleNode ? titleNode.parentElement : null;
   for (let depth = 0; depth < 6 && scope; depth += 1) {
     const rect = scope.getBoundingClientRect();
@@ -37,9 +48,13 @@ function collectPlaybarTransportButtons(doc, deps) {
     if (!label.includes("playbar")) return false;
     return playbarTransportButtonMatches(btn);
   });
-  if (labelled.some(isShownFn)) return labelled;
-
   const scoped = collectTitleScopeTransportButtons(documentRef, deps);
+  const anchor = findVisiblePlaybarAnchor(documentRef, deps);
+  // A visible on-screen title means the live bar is title-scoped. Stale
+  // "Playbar: Play" shells elsewhere in the DOM can still pass isShown.
+  if (anchor && scoped.some(isShownFn)) return scoped;
+
+  if (labelled.some(isShownFn)) return labelled;
   if (scoped.some(isShownFn)) return scoped;
   if (labelled.length) return labelled;
   return scoped;
@@ -68,6 +83,7 @@ if (typeof module !== "undefined") {
     playbarTransportButtonMatches,
     collectTitleScopeTransportButtons,
     collectPlaybarTransportButtons,
+    findVisiblePlaybarAnchor,
     resolveIsShown,
   };
 }

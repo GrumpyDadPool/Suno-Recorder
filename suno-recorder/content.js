@@ -1232,7 +1232,8 @@ async function clickPlaybarPlay(log) {
   } else {
     rewindMediaToStart();
   }
-  log("  click: play bar play");
+  const clickLabel = (button.getAttribute("aria-label") || "").trim() || "play bar transport";
+  log(`  click: play bar play (${clickLabel})`);
   forceClick(button);
   const deadline = Date.now() + 8000;
   let retried = false;

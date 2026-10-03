@@ -2,6 +2,7 @@ const assert = require("assert");
 const {
   pickPlaybarTransportButton,
   collectTitleScopeTransportButtons,
+  collectPlaybarTransportButtons,
 } = require("./playbar_transport_picker.js");
 
 function mockButton({ label, pause, shown = true }) {
@@ -96,6 +97,86 @@ assert.deepStrictEqual(
   scopedButtons,
   [scopeTree.visiblePlay],
   "title-scope walk should keep climbing past hidden-only transport controls"
+);
+
+function mockButtonInTree({ label, pause, shown = true, rect = { height: 40, width: 40, top: 800, bottom: 840 } }) {
+  return {
+    shown,
+    pause,
+    rect,
+    getAttribute(name) {
+      return name === "aria-label" ? label : "";
+    },
+    getBoundingClientRect() {
+      return this.rect;
+    },
+  };
+}
+
+function mockDocWithDecoyLabelledPlay() {
+  const realPlay = mockButtonInTree({ label: "Play", pause: false, shown: true });
+  const decoyPlay = mockButtonInTree({
+    label: "Playbar: Play",
+    pause: false,
+    shown: true,
+    rect: { height: 40, width: 40, top: 0, bottom: 40 },
+  });
+
+  const innerScope = {
+    parentElement: null,
+    getBoundingClientRect: () => ({ height: 72 }),
+    querySelectorAll(sel) {
+      if (sel === "button[aria-label]") return [realPlay];
+      return [];
+    },
+  };
+  const outerScope = {
+    parentElement: null,
+    getBoundingClientRect: () => ({ height: 72 }),
+    querySelectorAll(sel) {
+      if (sel === "button[aria-label]") return [realPlay];
+      return [];
+    },
+  };
+  innerScope.parentElement = outerScope;
+
+  const titleNode = {
+    parentElement: innerScope,
+    shown: true,
+    getAttribute(name) {
+      return name === "aria-label" ? "Playbar: Title" : "";
+    },
+    getBoundingClientRect: () => ({ height: 24, width: 120, top: 820, bottom: 844 }),
+  };
+
+  const doc = {
+    querySelectorAll(sel) {
+      if (sel === "button[aria-label]") return [decoyPlay, realPlay];
+      if (sel === '[aria-label*="Playbar: Title"]') return [titleNode];
+      if (sel === 'a[aria-label*="Playbar"][href*="/song/"]') return [];
+      return [];
+    },
+  };
+
+  return { doc, decoyPlay, realPlay, titleNode };
+}
+
+const decoyDoc = mockDocWithDecoyLabelledPlay();
+const collected = collectPlaybarTransportButtons(decoyDoc.doc, {
+  isShown: (btn) => btn.shown,
+});
+assert.deepStrictEqual(
+  collected,
+  [decoyDoc.realPlay],
+  "with a visible play-bar title, prefer title-scope transport over labelled Playbar shells"
+);
+assert.strictEqual(
+  pickPlaybarTransportButton(collected, false, {
+    isShown: (btn) => btn.shown,
+    buttonShowsPause: (btn) => btn.pause,
+  }),
+  decoyDoc.realPlay,
+  "One song should click the title-scope Play control, not Playbar: Play decoy"
 );
 
 console.log("playbar_transport_picker ok");
