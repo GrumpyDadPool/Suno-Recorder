@@ -1395,13 +1395,39 @@ function songPagePlaybackActive() {
   return Boolean(btn && buttonShowsPause(btn));
 }
 
-function readSongPageTrack() {
+function readTrackFromPauseLabel() {
+  const prefer = findActivePauseButton();
+  if (prefer) {
+    const parsed = parseRowLabel(prefer.getAttribute("aria-label") || "");
+    if (parsed && /^pause$/i.test(parsed.action) && isUsableSongTitle(parsed.title)) {
+      const link =
+        typeof prefer.closest === "function" ? prefer.closest('a[href*="/song/"]') : null;
+      return { title: parsed.title, id: songIdFromHref(hrefOf(link)) };
+    }
+  }
+  const barPause = playbarTransportControl(true);
+  if (barPause && buttonShowsPause(barPause)) {
+    const parsed = parseRowLabel(barPause.getAttribute("aria-label") || "");
+    if (parsed && isUsableSongTitle(parsed.title)) {
+      return { title: parsed.title, id: songIdFromHref(hrefOf(barPause)) };
+    }
+  }
+  return { title: "", id: "" };
+}
+
+// Title for One song: play bar and active pause control first; never a library row click.
+function readOneSongTargetTrack() {
   const match = location.pathname.match(/\/song\/([^/?#]+)/);
   const pathId = match ? match[1] : "";
 
   const fromBar = readPlaybarTrack();
   if (isUsableSongTitle(fromBar.title)) {
     return { title: fromBar.title, id: fromBar.id || pathId };
+  }
+
+  const fromPause = readTrackFromPauseLabel();
+  if (isUsableSongTitle(fromPause.title)) {
+    return { title: fromPause.title, id: fromPause.id || pathId || fromBar.id };
   }
 
   const heading = document.querySelector("h1");
@@ -1432,33 +1458,44 @@ function readSongPageTrack() {
   return { title: "", id: "" };
 }
 
-async function waitForSongPageReady(log, sessionStartedAt) {
+function readSongPageTrack() {
+  return readOneSongTargetTrack();
+}
+
+function oneSongTracksMatch(anchor, current) {
+  if (!anchor || !current) return false;
+  if (anchor.id && current.id) return anchor.id === current.id;
+  if (isUsableSongTitle(anchor.title) && isUsableSongTitle(current.title)) {
+    return titleKey(anchor.title) === titleKey(current.title);
+  }
+  return false;
+}
+
+async function waitForSongPageReady(log, sessionStartedAt, pressAnchor) {
   const deadline = Date.now() + 120_000;
   while (!stopRequested && Date.now() < deadline) {
     if (!(await ownsActiveSession(sessionStartedAt))) return null;
-    const track = readSongPageTrack();
+    const track = readOneSongTargetTrack();
     if (isUsableSongTitle(track.title)) return track;
+    if (pressAnchor && isUsableSongTitle(pressAnchor.title) && wasSongPlaying()) return pressAnchor;
     await sleep(250);
   }
   return null;
 }
 
-async function waitForSongPageUserPlay(log, sessionStartedAt) {
+async function waitForSongPageUserPlay(log, sessionStartedAt, pressAnchor) {
   log(ONE_SONG_PAGE_PROMPT);
-  const anchorTrack = readSongPageTrack();
-  const initialPlaying = songPagePlaybackActive() || Boolean(findPlayingMedia());
+  const anchorTrack =
+    pressAnchor && isUsableSongTitle(pressAnchor.title) ? pressAnchor : readOneSongTargetTrack();
+  const initialPlaying = wasSongPlaying();
 
   if (initialPlaying && isUsableSongTitle(anchorTrack.title)) {
     await sleep(350);
     if (!(await ownsActiveSession(sessionStartedAt))) return false;
-    const settled = readSongPageTrack();
-    const sameSong =
-      anchorTrack.id && settled.id
-        ? anchorTrack.id === settled.id
-        : titleKey(anchorTrack.title) === titleKey(settled.title);
+    const settled = readOneSongTargetTrack();
     if (
-      sameSong &&
-      (songPagePlaybackActive() || findPlayingMedia()) &&
+      oneSongTracksMatch(anchorTrack, settled) &&
+      wasSongPlaying() &&
       (await ownsActiveSession(sessionStartedAt))
     ) {
       return true;
@@ -1480,12 +1517,9 @@ async function waitForSongPageUserPlay(log, sessionStartedAt) {
       stopRequested = true;
       break;
     }
-    const playingNow = songPagePlaybackActive() || Boolean(findPlayingMedia());
-    const current = readSongPageTrack();
-    const sameSong =
-      anchorTrack.id && current.id
-        ? anchorTrack.id === current.id
-        : !anchorTrack.title || titleKey(current.title) === titleKey(anchorTrack.title);
+    const playingNow = wasSongPlaying();
+    const current = readOneSongTargetTrack();
+    const sameSong = oneSongTracksMatch(anchorTrack, current);
     if (!playingNow) sawQuiet = true;
     if (sawQuiet && playingNow && sameSong) return true;
     ticks += 1;
@@ -2989,6 +3023,7 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
 }
 
 async function runOneSong(log) {
+  const pressAnchor = readOneSongTargetTrack();
   let sessionStartedAt = 0;
   try {
     const initial = await getState();
@@ -2998,21 +3033,12 @@ async function runOneSong(log) {
     sessionStartedAt = Date.now();
   }
 
-  if (location.pathname.startsWith("/me")) {
-    const onPage = readSongPageTrack();
-    if (
-      !stopRequested &&
-      (await ownsActiveSession(sessionStartedAt)) &&
-      !isUsableSongTitle(onPage.title)
-    ) {
-      await selectFirstLibrarySong(log);
-      log(ONE_SONG_OPEN_DONE);
-    }
-  } else {
-    log(ONE_SONG_PAGE_PROMPT);
-  }
+  // One song never opens or plays a library row — only the track already on the bar / page.
+  log(ONE_SONG_PAGE_PROMPT);
 
-  let track = (await waitForSongPageReady(log, sessionStartedAt)) || { title: "", id: "" };
+  let track =
+    (await waitForSongPageReady(log, sessionStartedAt, pressAnchor)) || { title: "", id: "" };
+  if (!isUsableSongTitle(track.title) && isUsableSongTitle(pressAnchor.title)) track = pressAnchor;
   if (!track.title) {
     if (await supersededOneSong()) return;
     if (!(await ownsActiveSession(sessionStartedAt))) return;
@@ -3021,7 +3047,7 @@ async function runOneSong(log) {
     return;
   }
 
-  const played = await waitForSongPageUserPlay(log, sessionStartedAt);
+  const played = await waitForSongPageUserPlay(log, sessionStartedAt, pressAnchor);
   if (!played) {
     if (await supersededOneSong()) return;
     if (!(await ownsActiveSession(sessionStartedAt))) return;
