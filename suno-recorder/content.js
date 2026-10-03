@@ -630,6 +630,10 @@ function findPlayingMedia() {
   return getMediaElements().find((m) => !m.paused && !m.ended && m.currentTime > 0.05) || null;
 }
 
+function findActiveMediaElement() {
+  return getMediaElements().find((m) => !m.paused && !m.ended) || null;
+}
+
 function isPlaybarPlaying() {
   return Array.from(document.querySelectorAll("button[aria-label]")).some((btn) => {
     if (!isShown(btn)) return false;
@@ -1195,9 +1199,19 @@ async function waitForPauseRestartConfirmed(log, deadlineMs, sessionStartedAt) {
 
 async function waitForPlaybackResumed(deadlineMs, sessionStartedAt) {
   const deadline = Date.now() + deadlineMs;
+  let lastMediaTime = -1;
   while (Date.now() < deadline && !stopRequested) {
     if (sessionStartedAt && !(await ownsActiveSession(sessionStartedAt))) return false;
     if (findPlayingMedia()) return true;
+    const active = findActiveMediaElement();
+    if (active) {
+      if (active.currentTime > 0.02) return true;
+      if (lastMediaTime >= 0 && active.currentTime > lastMediaTime + 0.005) return true;
+      lastMediaTime = active.currentTime;
+    } else {
+      lastMediaTime = -1;
+    }
+    if (isPlaybarPlaying()) return true;
     if (playbarTransportShowsPause()) return true;
     if (songPageTransportShowsPause()) return true;
     await sleep(200);
@@ -1240,11 +1254,14 @@ function pickPlaybarOnlyPlayTargets() {
   const list = [];
   const add = (btn) => {
     if (!btn || seen.has(btn) || isLibraryRowTransportButton(btn)) return;
+    if (buttonShowsPause(btn)) return;
     seen.add(btn);
     list.push(btn);
   };
   add(playbarTransportControl(false));
-  add(playbarTransportControl(true));
+  for (const btn of collectPlaybarTransportButtons()) {
+    if (isShown(btn)) add(btn);
+  }
   return list;
 }
 
@@ -1303,7 +1320,8 @@ async function pauseAndRestartPlayback(log, sessionStartedAt, options) {
     const label = (target.getAttribute("aria-label") || "").trim();
     log(`  click: play (${label || "transport"})`);
     forceClick(target);
-    if (await waitForPlaybackResumed(4000, sessionStartedAt)) return true;
+    const resumeMs = oneSong ? 10_000 : 4000;
+    if (await waitForPlaybackResumed(resumeMs, sessionStartedAt)) return true;
     await sleep(250);
   }
 
@@ -3030,7 +3048,7 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
   }
   log("  site playback confirmed");
 
-  const media = findPlayingMedia();
+  const media = findPlayingMedia() || findActiveMediaElement();
   await waitForTrackEnd(media, log);
 
   if (stopRequested || !(await ownsActiveSession(sessionStartedAt))) {
