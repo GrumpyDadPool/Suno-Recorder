@@ -692,6 +692,27 @@ function pauseAllPlayback(log) {
   return acted;
 }
 
+function isChromeNavigationTitle(title) {
+  const key = titleKey(title);
+  const blocked = ["library", "create", "explore", "home", "search", "radio", "profile"];
+  return blocked.includes(key);
+}
+
+function isUsableSongTitle(title) {
+  if (!title || !String(title).trim()) return false;
+  return !isChromeNavigationTitle(title);
+}
+
+function resolveClickTarget(el) {
+  if (!el || el.nodeType !== 1) return null;
+  if (typeof el.click === "function") return el;
+  if (typeof el.closest === "function") {
+    const interactive = el.closest("button,a[href],[role='button']");
+    if (interactive && typeof interactive.click === "function") return interactive;
+  }
+  return null;
+}
+
 function hoverRow(button) {
   const row =
     button.closest('[role="row"], [role="listitem"], li, tr, [data-testid]') ||
@@ -706,27 +727,27 @@ function hoverRow(button) {
 }
 
 function forceClick(el) {
-  if (!el) return;
+  const target = resolveClickTarget(el);
+  if (!target) return;
   const opts = { bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 };
   try {
-    el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+    target.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
   } catch (_) {
     /* ignore */
   }
-  hoverRow(el);
-  if (typeof el.focus === "function") {
+  hoverRow(target);
+  if (typeof target.focus === "function") {
     try {
-      el.focus({ preventScroll: true });
+      target.focus({ preventScroll: true });
     } catch (_) {
-      el.focus();
+      target.focus();
     }
   }
   for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
     const Ctor = type.startsWith("pointer") ? PointerEvent : MouseEvent;
-    el.dispatchEvent(new Ctor(type, opts));
+    target.dispatchEvent(new Ctor(type, opts));
   }
-  // Native click as a final fallback for listeners that only bind via onclick.
-  el.click();
+  if (typeof target.click === "function") target.click();
 }
 
 async function clickPlayForTitle(title, button, log) {
@@ -1048,22 +1069,26 @@ function findPlaybarTransportButton(opts) {
 }
 
 function playbarClickTarget(button) {
-  if (!button || typeof button.getBoundingClientRect !== "function") return button;
+  if (!button || typeof button.getBoundingClientRect !== "function") return resolveClickTarget(button);
   const rect = button.getBoundingClientRect();
-  if (rect.width <= 1 || rect.height <= 1) return button;
+  if (rect.width <= 1 || rect.height <= 1) return resolveClickTarget(button);
   const x = rect.left + rect.width / 2;
   const y = rect.top + rect.height / 2;
   let hit = null;
   try {
     hit = document.elementFromPoint(x, y);
   } catch (_) {
-    return button;
+    return resolveClickTarget(button);
   }
-  if (!hit) return button;
-  if (button === hit || button.contains(hit)) return hit;
-  const interactive = hit.closest ? hit.closest("button,[role='button']") : null;
-  if (interactive && (button === interactive || button.contains(interactive))) return interactive;
-  return button;
+  if (!hit) return resolveClickTarget(button);
+  if (button === hit || button.contains(hit)) {
+    return resolveClickTarget(hit) || resolveClickTarget(button);
+  }
+  const interactive = hit.closest ? hit.closest("button,[role='button'],a[href]") : null;
+  if (interactive && (button === interactive || button.contains(interactive))) {
+    return resolveClickTarget(interactive);
+  }
+  return resolveClickTarget(button);
 }
 
 function playbarMediaIsPaused() {
@@ -1187,9 +1212,14 @@ async function pauseAndRestartPlayback(log, sessionStartedAt) {
       log("  ! play control not found");
       return false;
     }
-    const label = (playOnly.getAttribute("aria-label") || "").trim();
+    const playClick = resolveClickTarget(playbarClickTarget(playOnly));
+    if (!playClick) {
+      log("  ! play control is not clickable");
+      return false;
+    }
+    const label = (playClick.getAttribute("aria-label") || "").trim();
     log(`  click: play (${label || "transport"})`);
-    forceClick(playbarClickTarget(playOnly));
+    forceClick(playClick);
     return waitForPlaybackResumed(8000, sessionStartedAt);
   }
 
@@ -1199,7 +1229,12 @@ async function pauseAndRestartPlayback(log, sessionStartedAt) {
     log("  ! pause control not found");
     return false;
   }
-  forceClick(playbarClickTarget(pauseTarget));
+  const pauseClick = resolveClickTarget(playbarClickTarget(pauseTarget));
+  if (!pauseClick) {
+    log("  ! pause control is not clickable");
+    return false;
+  }
+  forceClick(pauseClick);
   await sleep(400);
   rewindMediaToStart();
 
@@ -1211,7 +1246,8 @@ async function pauseAndRestartPlayback(log, sessionStartedAt) {
   const playTargets = pickPlayTargets(pauseTarget);
   for (const btn of playTargets) {
     if (sessionStartedAt && !(await ownsActiveSession(sessionStartedAt))) return false;
-    const target = playbarClickTarget(btn);
+    const target = resolveClickTarget(playbarClickTarget(btn));
+    if (!target) continue;
     const label = (target.getAttribute("aria-label") || "").trim();
     log(`  click: play (${label || "transport"})`);
     forceClick(target);
@@ -1361,12 +1397,17 @@ function songPagePlaybackActive() {
 
 function readSongPageTrack() {
   const match = location.pathname.match(/\/song\/([^/?#]+)/);
-  const id = match ? match[1] : "";
+  const pathId = match ? match[1] : "";
+
+  const fromBar = readPlaybarTrack();
+  if (isUsableSongTitle(fromBar.title)) {
+    return { title: fromBar.title, id: fromBar.id || pathId };
+  }
 
   const heading = document.querySelector("h1");
   if (heading && isShown(heading)) {
     const title = (heading.textContent || "").replace(/\s+/g, " ").trim();
-    if (title) return { title, id };
+    if (isUsableSongTitle(title)) return { title, id: pathId };
   }
 
   if (typeof coverAltTitle === "function") {
@@ -1376,7 +1417,7 @@ function readSongPageTrack() {
       const alt = img.alt || "";
       if (!/^image for /i.test(alt)) continue;
       const title = coverAltTitle(alt);
-      if (!title) continue;
+      if (!title || !isUsableSongTitle(title)) continue;
       const rect = img.getBoundingClientRect();
       covers.push({ title, area: rect.width * rect.height, top: rect.top });
     }
@@ -1384,23 +1425,19 @@ function readSongPageTrack() {
       if (b.area !== a.area) return b.area - a.area;
       return a.top - b.top;
     });
-    if (covers.length) return { title: covers[0].title, id };
+    if (covers.length) return { title: covers[0].title, id: pathId };
   }
 
-  return { title: "", id };
+  if (pathId) return { title: "", id: pathId };
+  return { title: "", id: "" };
 }
 
 async function waitForSongPageReady(log, sessionStartedAt) {
   const deadline = Date.now() + 120_000;
   while (!stopRequested && Date.now() < deadline) {
     if (!(await ownsActiveSession(sessionStartedAt))) return null;
-    if (location.pathname.includes("/song/")) {
-      const track = readSongPageTrack();
-      if (track.title) return track;
-    }
-    for (const row of collectVisibleRows()) {
-      if (row.title && panelShowsTitle(row.title)) return { title: row.title, id: "" };
-    }
+    const track = readSongPageTrack();
+    if (isUsableSongTitle(track.title)) return track;
     await sleep(250);
   }
   return null;
@@ -1411,7 +1448,7 @@ async function waitForSongPageUserPlay(log, sessionStartedAt) {
   const anchorTrack = readSongPageTrack();
   const initialPlaying = songPagePlaybackActive() || Boolean(findPlayingMedia());
 
-  if (initialPlaying && anchorTrack.title) {
+  if (initialPlaying && isUsableSongTitle(anchorTrack.title)) {
     await sleep(350);
     if (!(await ownsActiveSession(sessionStartedAt))) return false;
     const settled = readSongPageTrack();
@@ -2240,15 +2277,16 @@ function clickTargetForSongRow(button, title) {
 }
 
 function clickElement(el) {
-  if (!el || isRowPlayButton(el) || insidePlayControl(el)) return;
-  const link = typeof el.closest === "function" ? el.closest("a[href]") : null;
+  const target = resolveClickTarget(el);
+  if (!target || isRowPlayButton(target) || insidePlayControl(target)) return;
+  const link = typeof target.closest === "function" ? target.closest("a[href]") : null;
   const guard = (event) => {
     if (link && link.contains(event.target)) event.preventDefault();
   };
   if (link) document.addEventListener("click", guard, true);
   try {
     // Do not scrollIntoView. That scrolls the virtualized library and clips page 1.
-    el.click();
+    target.click();
   } finally {
     if (link) document.removeEventListener("click", guard, true);
   }
@@ -2925,7 +2963,7 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
   }
 
   const freshTrack = readSongPageTrack();
-  const saveTrack = freshTrack.title ? freshTrack : track;
+  const saveTrack = isUsableSongTitle(freshTrack.title) ? freshTrack : track;
 
   const options = await getOptions();
   const filename = buildRelativePath(options.saveFolder, options.filenamePrefix || "", saveTrack.title);
@@ -2961,7 +2999,12 @@ async function runOneSong(log) {
   }
 
   if (location.pathname.startsWith("/me")) {
-    if (!stopRequested && (await ownsActiveSession(sessionStartedAt))) {
+    const onPage = readSongPageTrack();
+    if (
+      !stopRequested &&
+      (await ownsActiveSession(sessionStartedAt)) &&
+      !isUsableSongTitle(onPage.title)
+    ) {
       await selectFirstLibrarySong(log);
       log(ONE_SONG_OPEN_DONE);
     }
@@ -2988,7 +3031,18 @@ async function runOneSong(log) {
   }
 
   const freshBeforeCapture = readSongPageTrack();
-  if (freshBeforeCapture.title) track = freshBeforeCapture;
+  if (isUsableSongTitle(freshBeforeCapture.title)) track = freshBeforeCapture;
+  if (!isUsableSongTitle(track.title)) {
+    if (await supersededOneSong()) return;
+    if (!(await ownsActiveSession(sessionStartedAt))) return;
+    await failOneSongCapture(
+      sessionStartedAt,
+      track.title || "untitled",
+      "Could not read the song title from the page or play bar. Open the song and try One song again.",
+      log
+    );
+    return;
+  }
 
   const capturingStartedAt = Date.now();
   await setState({
