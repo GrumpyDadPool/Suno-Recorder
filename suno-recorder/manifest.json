@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Suno Recorder",
-  "version": "1.6.12",
+  "version": "1.6.13",
   "description": "Record your Suno library track-by-track with Chrome tab audio — saves WAV files, lyrics, and cover art to your Chrome download folder.",
   "permissions": ["tabCapture", "activeTab", "downloads", "storage", "offscreen", "alarms", "tabs", "scripting", "debugger", "clipboardRead", "clipboardWrite"],
   "host_permissions": ["https://suno.com/*", "https://cdn2.suno.ai/*"],

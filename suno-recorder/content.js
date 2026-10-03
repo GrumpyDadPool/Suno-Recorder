@@ -1453,11 +1453,39 @@ async function refreshCaptureTabOwnership() {
 async function ownsActiveSession(sessionStartedAt) {
   try {
     const state = await getState();
-    if (!state) return false;
+    if (!state || userEndedSession(state)) return false;
+    if (state.status !== "collecting" && state.status !== "capturing") return false;
     if (Number(state.sessionEpoch) && Number(state.sessionEpoch) !== Number(localSessionEpoch)) return false;
     if (sessionStartedAt && state.startedAt && Number(state.startedAt) !== Number(sessionStartedAt)) return false;
     await refreshCaptureTabOwnership();
     return captureTabMatches;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function clearStaleOneSongWait(log, reason) {
+  const sessionEpoch = Date.now();
+  localSessionEpoch = sessionEpoch;
+  stopRequested = true;
+  if (log) log(reason || "One song was not armed — cleared stale wait.");
+  await setState({
+    status: "idle",
+    resetAt: Date.now(),
+    resetReason: reason || "one-song-not-armed",
+    sessionEpoch,
+  });
+  try {
+    await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+async function oneSongCaptureArmedOnThisTab() {
+  try {
+    const resp = await chrome.runtime.sendMessage({ target: "background", type: "isCaptureTab" });
+    return Boolean(resp && resp.isCaptureTab);
   } catch (_) {
     return false;
   }
@@ -1658,6 +1686,8 @@ async function waitForSongPageUserPlay(log, sessionStartedAt, pressAnchor) {
       wasSongPlaying() &&
       (await ownsActiveSession(sessionStartedAt))
     ) {
+      const armed = await getState();
+      if (!armed || armed.status !== "collecting" || armed.mode !== "one") return false;
       return true;
     }
   }
@@ -1681,7 +1711,11 @@ async function waitForSongPageUserPlay(log, sessionStartedAt, pressAnchor) {
     const current = readOneSongTargetTrack();
     const sameSong = oneSongTracksMatch(anchorTrack, current);
     if (!playingNow) sawQuiet = true;
-    if (sawQuiet && playingNow && sameSong) return true;
+    if (sawQuiet && playingNow && sameSong) {
+      if (!state || state.status !== "collecting" || state.mode !== "one") return false;
+      if (!(await ownsActiveSession(sessionStartedAt))) return false;
+      return true;
+    }
     ticks += 1;
     if (ticks % 10 === 0) touchHeartbeat();
     if (ticks % 50 === 0) log(ONE_SONG_PAGE_PROMPT);
@@ -3208,15 +3242,21 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
 }
 
 async function runOneSong(log) {
-  const pressAnchor = readOneSongTargetTrack();
-  let sessionStartedAt = 0;
+  let initial = null;
   try {
-    const initial = await getState();
-    sessionStartedAt = Number(initial && initial.startedAt) || Date.now();
-    localSessionEpoch = Number(initial && initial.sessionEpoch) || 0;
+    initial = await getState();
   } catch (_) {
-    sessionStartedAt = Date.now();
+    initial = null;
   }
+  if (!initial || initial.mode !== "one" || initial.status !== "collecting") return;
+  if (!(await oneSongCaptureArmedOnThisTab())) {
+    await clearStaleOneSongWait(log, "One song is not armed on this tab — play a row will not start recording.");
+    return;
+  }
+
+  const pressAnchor = readOneSongTargetTrack();
+  let sessionStartedAt = Number(initial.startedAt) || Date.now();
+  localSessionEpoch = Number(initial.sessionEpoch) || 0;
 
   // One song never opens or plays a library row — only the track already on the bar / page.
   log(ONE_SONG_PAGE_PROMPT);
@@ -3256,6 +3296,11 @@ async function runOneSong(log) {
   }
 
   log(`One song: "${track.title}". Pause → arm recorder → play bar play.`);
+
+  if (!(await ownsActiveSession(sessionStartedAt)) || !(await oneSongCaptureArmedOnThisTab())) {
+    await clearStaleOneSongWait(log, "One song session ended before capture could start.");
+    return;
+  }
 
   let success = false;
   try {
@@ -3588,6 +3633,10 @@ async function start() {
   await refreshCaptureTabOwnership();
   if (!captureTabMatches) return;
   const mode = state.mode === "one" ? "one" : state.mode === "meta" ? "meta" : "library";
+  if (mode === "one" && !(await oneSongCaptureArmedOnThisTab())) {
+    await clearStaleOneSongWait(log, "One song is not armed on this tab — play a row will not start recording.");
+    return;
+  }
   if (mode === "one" && !location.pathname.startsWith("/me") && !location.pathname.includes("/song/")) {
     log("Open a library or song page for One song capture.");
     return;
@@ -3636,6 +3685,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (!runtimeAlive()) return;
   if (area === "local" && changes.sunoCaptureState) {
     const newState = changes.sunoCaptureState.newValue;
+    if (newState && newState.sessionEpoch) {
+      localSessionEpoch = Number(newState.sessionEpoch);
+    }
     if (newState && newState.status === "collecting") {
       const epoch = Number(newState.sessionEpoch) || 0;
       if (!(sessionRunning && epoch && epoch === localSessionEpoch)) {

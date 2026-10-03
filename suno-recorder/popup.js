@@ -61,6 +61,10 @@ function render(state, error, lastLog) {
       statusEl.textContent = `Done · ${done} saved${failed ? `, ${failed} failed` : ""} / ${state.queue.length}`;
       progressWrap.hidden = false;
       progressBar.style.width = "100%";
+    } else if (state.stoppedAt) {
+      statusEl.textContent = "Stopped";
+      progressWrap.hidden = true;
+      progressBar.style.width = "0%";
     } else {
       statusEl.textContent = "Ready";
       progressWrap.hidden = true;
@@ -104,6 +108,33 @@ function render(state, error, lastLog) {
   errorEl.textContent = error ? error : "";
 }
 
+async function reconcileOrphanOneSongState(state) {
+  if (!state || state.mode !== "one" || state.status !== "collecting") return state;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !tab.id) return state;
+  let resp = null;
+  try {
+    resp = await chrome.runtime.sendMessage({
+      target: "background",
+      type: "isCaptureTab",
+      tabId: tab.id,
+    });
+  } catch (_) {
+    resp = null;
+  }
+  if (resp && resp.ok && resp.isCaptureTab) return state;
+  const sessionEpoch = Date.now();
+  await chrome.storage.local.set({
+    sunoCaptureState: {
+      status: "idle",
+      resetAt: Date.now(),
+      resetReason: "one-song-not-armed",
+      sessionEpoch,
+    },
+  });
+  return { status: "idle", resetAt: Date.now(), sessionEpoch };
+}
+
 async function refresh() {
   const result = await chrome.storage.local.get([
     "sunoCaptureState",
@@ -117,8 +148,8 @@ async function refresh() {
     "sunoCaptureError",
     "sunoCaptureLastLog",
   ]);
-  render(latest.sunoCaptureState, latest.sunoCaptureError, latest.sunoCaptureLastLog);
-  const state = latest.sunoCaptureState;
+  const state = await reconcileOrphanOneSongState(latest.sunoCaptureState);
+  render(state, latest.sunoCaptureError, latest.sunoCaptureLastLog);
   const needsTimer =
     state && state.mode === "one" && state.status === "capturing" && state.capturingStartedAt;
   if (needsTimer && !captureUiTimer) {
@@ -334,6 +365,7 @@ oneSongBtn.addEventListener("click", () => beginSession("one"));
 lyricsBtn.addEventListener("click", () => beginLyricsAndCovers());
 
 stopBtn.addEventListener("click", async () => {
+  const sessionEpoch = Date.now();
   try {
     try {
       await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
@@ -341,9 +373,10 @@ stopBtn.addEventListener("click", async () => {
       /* no active recorder */
     }
     await chrome.storage.local.set({
-      sunoCaptureState: { status: "idle", stoppedAt: Date.now() },
+      sunoCaptureState: { status: "idle", stoppedAt: Date.now(), sessionEpoch },
     });
     await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+    await chrome.storage.local.remove(["sunoCaptureError"]);
   } catch (err) {
     errorEl.textContent = err && err.message ? err.message : String(err);
   }

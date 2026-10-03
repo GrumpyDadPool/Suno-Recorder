@@ -146,7 +146,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleMessage(message, sender) {
   switch (message.type) {
     case "isCaptureTab": {
-      const tabId = sender && sender.tab && sender.tab.id;
+      const tabId = message.tabId || (sender && sender.tab && sender.tab.id);
       return { ok: true, isCaptureTab: Boolean(tabId && tabId === activeCaptureTabId) };
     }
 
