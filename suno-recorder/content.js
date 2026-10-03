@@ -1090,10 +1090,132 @@ function playbarTransportShowsPlay() {
   return Boolean(btn && !buttonShowsPause(btn));
 }
 
+function playbackIsQuiet() {
+  const media = getMediaElements();
+  if (!media.length) return true;
+  if (findPlayingMedia()) return false;
+  return media.every((m) => m.paused || m.ended);
+}
+
 function playbarTransportPauseLanded() {
   if (playbarTransportShowsPlay()) return true;
-  const mediaQuiet = playbarMediaIsPaused() || !findPlayingMedia();
-  return mediaQuiet && !playbarTransportShowsPause();
+  return playbackIsQuiet();
+}
+
+function songPageTransportShowsPause() {
+  const btn = findSongPageTransportButton();
+  return Boolean(btn && buttonShowsPause(btn));
+}
+
+function songPageTransportShowsPlay() {
+  const btn = findSongPageTransportButton();
+  return Boolean(btn && !buttonShowsPause(btn));
+}
+
+function pauseRestartConfirmed() {
+  if (playbackIsQuiet()) return true;
+  if (songPageTransportShowsPlay()) return true;
+  if (playbarTransportShowsPlay()) return true;
+  return false;
+}
+
+function wasSongPlaying() {
+  return (
+    songPagePlaybackActive() ||
+    Boolean(findPlayingMedia()) ||
+    playbarTransportShowsPause() ||
+    songPageTransportShowsPause()
+  );
+}
+
+async function waitForPauseRestartConfirmed(log, deadlineMs) {
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline && !stopRequested) {
+    if (pauseRestartConfirmed()) {
+      log("  pause confirmed — restarting playback");
+      return true;
+    }
+    await sleep(150);
+  }
+  return false;
+}
+
+async function waitForPlaybackResumed(deadlineMs) {
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline && !stopRequested) {
+    if (findPlayingMedia()) return true;
+    if (playbarTransportShowsPause()) return true;
+    if (songPageTransportShowsPause()) return true;
+    await sleep(200);
+  }
+  return false;
+}
+
+function pickPauseTarget() {
+  const song = findSongPageTransportButton();
+  if (song && buttonShowsPause(song)) return song;
+  const barPause = playbarTransportControl(true);
+  if (barPause && buttonShowsPause(barPause)) return barPause;
+  if (song) return song;
+  return playbarTransportControl(false) || barPause;
+}
+
+function pickPlayTargets(pauseTarget) {
+  const seen = new Set();
+  const list = [];
+  const add = (btn) => {
+    if (!btn || seen.has(btn)) return;
+    seen.add(btn);
+    list.push(btn);
+  };
+  add(findSongPageTransportButton());
+  add(playbarTransportControl(false));
+  add(pauseTarget);
+  add(playbarTransportControl(true));
+  return list;
+}
+
+async function pauseAndRestartPlayback(log) {
+  if (!wasSongPlaying()) {
+    rewindMediaToStart();
+    const playOnly = findSongPageTransportButton() || playbarTransportControl(false);
+    if (!playOnly) {
+      log("  ! play control not found");
+      return false;
+    }
+    const label = (playOnly.getAttribute("aria-label") || "").trim();
+    log(`  click: play (${label || "transport"})`);
+    forceClick(playbarClickTarget(playOnly));
+    return waitForPlaybackResumed(8000);
+  }
+
+  log("Song playing. Pausing to restart...");
+  const pauseTarget = pickPauseTarget();
+  if (!pauseTarget) {
+    log("  ! pause control not found");
+    return false;
+  }
+  forceClick(playbarClickTarget(pauseTarget));
+  await sleep(400);
+  rewindMediaToStart();
+
+  if (!(await waitForPauseRestartConfirmed(log, 6000))) {
+    log("  ! pause not confirmed before restart");
+    return false;
+  }
+
+  const playTargets = pickPlayTargets(pauseTarget);
+  for (const btn of playTargets) {
+    const target = playbarClickTarget(btn);
+    const label = (target.getAttribute("aria-label") || "").trim();
+    log(`  click: play (${label || "transport"})`);
+    forceClick(target);
+    if (await waitForPlaybackResumed(4000)) return true;
+    await sleep(250);
+  }
+
+  log("  ! playback did not resume after restart");
+  return false;
 }
 
 function rewindMediaToStart() {
@@ -1352,82 +1474,7 @@ async function waitForPlaybarChange(initial, log) {
 }
 
 async function clickPlaybarPlay(log) {
-  const playingBefore =
-    Boolean(findPlayingMedia()) || playbarTransportShowsPause();
-  let button = findPlaybarTransportButton({ preferPause: playingBefore });
-  if (!button) {
-    log("  ! play bar play button not found");
-    return false;
-  }
-  if (buttonShowsPause(button)) {
-    log("  pausing the play bar so the song can start from the beginning");
-    forceClick(playbarClickTarget(button));
-    await sleep(350);
-    rewindMediaToStart();
-    await sleep(200);
-    button = null;
-    for (let attempt = 0; attempt < 30 && !stopRequested; attempt += 1) {
-      if (playbarTransportShowsPlay()) {
-        button = playbarTransportControl(false);
-        if (button) {
-          log("  play bar paused — transport shows play");
-          break;
-        }
-      }
-      if (playbarTransportPauseLanded()) {
-        const fallback = playbarTransportControl(false);
-        if (fallback) {
-          button = fallback;
-          log("  play bar paused — media stopped and play control is available");
-          break;
-        }
-      }
-      if (attempt === 7 || attempt === 15) {
-        const pauseAgain = playbarTransportControl(true);
-        if (pauseAgain && buttonShowsPause(pauseAgain)) forceClick(playbarClickTarget(pauseAgain));
-      }
-      await sleep(200);
-    }
-    if (!button) {
-      log("  ! play bar play button not found after pausing for restart");
-      return false;
-    }
-    if (buttonShowsPause(button) && !playbarTransportPauseLanded()) {
-      log("  ! play bar still shows pause after pausing — could not arm play for restart");
-      return false;
-    }
-    if (buttonShowsPause(button)) {
-      button = playbarTransportControl(false) || button;
-    }
-  } else {
-    rewindMediaToStart();
-  }
-  const clickTarget = playbarClickTarget(button);
-  const clickLabel = (clickTarget.getAttribute("aria-label") || button.getAttribute("aria-label") || "")
-    .trim() || "play bar transport";
-  log(`  click: play bar play (${clickLabel})`);
-  forceClick(clickTarget);
-  const deadline = Date.now() + 8000;
-  let retried = false;
-  while (Date.now() < deadline) {
-    if (stopRequested) return false;
-    const again = playbarTransportControl(true);
-    if (
-      playbarTransportShowsPause() ||
-      findPlayingMedia() ||
-      (again && buttonShowsPause(again))
-    ) {
-      return true;
-    }
-    if (!retried && Date.now() > deadline - 6000) {
-      retried = true;
-      const retry = findPlaybarTransportButton({ preferPause: false });
-      if (retry && !buttonShowsPause(retry)) forceClick(retry);
-    }
-    await sleep(200);
-  }
-  log("  ! play bar playback not confirmed within 8s after clicking play");
-  return false;
+  return pauseAndRestartPlayback(log);
 }
 
 function playbarRootElement() {
@@ -2740,7 +2787,7 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
     return false;
   }
 
-  const playing = await clickPlaybarPlay(log);
+  const playing = await pauseAndRestartPlayback(log);
   if (!playing) {
     log("  ! could not restart playback from the beginning — discarding");
     await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
