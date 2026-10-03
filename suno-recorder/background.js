@@ -27,6 +27,7 @@ const LIBRARY_KEYS = {
   PageDown: { key: "PageDown", code: "PageDown", windowsVirtualKeyCode: 34, nativeVirtualKeyCode: 34 },
 };
 let debuggerTabId = null;
+let activeCaptureTabId = null;
 
 // --- Animated toolbar icon while a capture session is active ---------------
 // A toolbar action icon can't play a GIF, so we redraw it frame-by-frame via
@@ -144,11 +145,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleMessage(message, sender) {
   switch (message.type) {
+    case "isCaptureTab": {
+      const tabId = sender && sender.tab && sender.tab.id;
+      return { ok: true, isCaptureTab: Boolean(tabId && tabId === activeCaptureTabId) };
+    }
+
     case "startSession": {
       const tabId = message.tabId;
       if (!tabId) {
         throw new Error("startSession message had no tabId — can't capture");
       }
+      activeCaptureTabId = tabId;
       // Chrome discards an unused tabCapture stream id after about 10 seconds
       // ("expires after a few seconds" in the tabCapture docs). Taking the id
       // and only then creating the offscreen document burned that window, so
@@ -299,6 +306,7 @@ async function handleMessage(message, sender) {
     }
 
     case "endSession": {
+      activeCaptureTabId = null;
       await stopKeepalive();
       stopIconAnimation();
       await detachDebugger(debuggerTabId);

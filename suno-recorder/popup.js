@@ -10,7 +10,8 @@ const optionsLink = document.getElementById("optionsLink");
 const oneSongBtn = document.getElementById("oneSongBtn");
 const lyricsBtn = document.getElementById("lyricsBtn");
 
-const ONE_SONG_PROMPT = "Click the song so it shows on the bottom play bar.";
+const ONE_SONG_PROMPT = "Click the play button on the song page, not the bottom play bar.";
+let captureUiTimer = null;
 // Arms tab capture only. The One song wait for a play-bar title is not covered
 // by this timer. Stop is the only way to cancel that wait.
 const START_TIMEOUT_MS = 20_000;
@@ -32,6 +33,13 @@ function parseSunoTabUrl(urlString) {
 
 function isSunoLibraryPath(pathname) {
   return pathname === "/me" || pathname.startsWith("/me/");
+}
+
+function formatElapsed(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return `${min}:${String(sec).padStart(2, "0")}`;
 }
 
 function setBusy(isBusy) {
@@ -78,9 +86,13 @@ function render(state, error, lastLog) {
     const current = state.queue && state.queue[state.currentIndex];
     const label = state.currentTitle || (typeof current === "string" ? current : current && current.title);
     const action = state.mode === "meta" ? "Lyrics and covers" : "Recording";
-    statusEl.textContent = total
-      ? `${action} ${Math.min(done + 1, total)} / ${total}${label ? ` · ${label}` : ""}`
-      : `${action}${label ? ` · ${label}` : ""}`;
+    if (state.mode === "one" && state.capturingStartedAt) {
+      statusEl.textContent = `${action} ${formatElapsed(Date.now() - state.capturingStartedAt)}${label ? ` · ${label}` : ""}`;
+    } else {
+      statusEl.textContent = total
+        ? `${action} ${Math.min(done + 1, total)} / ${total}${label ? ` · ${label}` : ""}`
+        : `${action}${label ? ` · ${label}` : ""}`;
+    }
     progressWrap.hidden = false;
     const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 12;
     progressBar.style.width = `${Math.max(pct, 10)}%`;
@@ -106,6 +118,17 @@ async function refresh() {
     "sunoCaptureLastLog",
   ]);
   render(latest.sunoCaptureState, latest.sunoCaptureError, latest.sunoCaptureLastLog);
+  const state = latest.sunoCaptureState;
+  const needsTimer =
+    state && state.mode === "one" && state.status === "capturing" && state.capturingStartedAt;
+  if (needsTimer && !captureUiTimer) {
+    captureUiTimer = setInterval(() => {
+      void refresh();
+    }, 500);
+  } else if (!needsTimer && captureUiTimer) {
+    clearInterval(captureUiTimer);
+    captureUiTimer = null;
+  }
 }
 
 async function maybeClearStaleSession(state, heartbeat) {
@@ -162,7 +185,7 @@ async function beginSession(mode) {
     if (!parsed) {
       throw new Error(
         mode === "one"
-          ? "Open suno.com, click One song, then click the song so it shows on the bottom play bar."
+          ? "Open suno.com, click One song, then use the play button on the song page (not the bottom play bar)."
           : "Open suno.com/me in this tab first, then click Start recording."
       );
     }
@@ -179,12 +202,15 @@ async function beginSession(mode) {
       /* ignore */
     }
 
+    const sessionEpoch = Date.now();
     await chrome.storage.local.set({
       sunoCaptureState: {
         status: "starting",
         queue: [],
         currentIndex: 0,
-        startedAt: Date.now(),
+        startedAt: sessionEpoch,
+        sessionEpoch,
+        captureTabId: tab.id,
         mode,
         prompt: mode === "one" ? ONE_SONG_PROMPT : "",
       },
@@ -213,7 +239,9 @@ async function beginSession(mode) {
         status: "collecting",
         queue: [],
         currentIndex: 0,
-        startedAt: Date.now(),
+        startedAt: sessionEpoch,
+        sessionEpoch,
+        captureTabId: tab.id,
         mode,
         prompt: mode === "one" ? ONE_SONG_PROMPT : "",
       },

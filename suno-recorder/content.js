@@ -1023,7 +1023,8 @@ function readPlaybarTrack() {
   return { title: "", id: "" };
 }
 
-const ONE_SONG_PROMPT = "Click the song so it shows on the bottom play bar.";
+const ONE_SONG_PAGE_PROMPT = "Click the play button on the song page, not the bottom play bar.";
+const ONE_SONG_OPEN_DONE = `Done: a_suno_clickAll(). ${ONE_SONG_PAGE_PROMPT}`;
 
 function buttonShowsPause(btn) {
   if (!btn) return false;
@@ -1091,17 +1092,134 @@ function userEndedSession(state) {
 }
 
 let oneSongStartedAt = 0;
+let localSessionEpoch = 0;
+let captureTabMatches = true;
+
+async function refreshCaptureTabOwnership() {
+  try {
+    const resp = await chrome.runtime.sendMessage({ target: "background", type: "isCaptureTab" });
+    captureTabMatches = Boolean(resp && resp.isCaptureTab);
+  } catch (_) {
+    captureTabMatches = true;
+  }
+}
+
+async function ownsActiveSession(sessionStartedAt) {
+  try {
+    const state = await getState();
+    if (!state) return false;
+    if (Number(state.sessionEpoch) && Number(state.sessionEpoch) !== Number(localSessionEpoch)) return false;
+    if (sessionStartedAt && state.startedAt && Number(state.startedAt) !== Number(sessionStartedAt)) return false;
+    await refreshCaptureTabOwnership();
+    return captureTabMatches;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function endOneSongIfOwner(sessionStartedAt, statePatch) {
+  if (!(await ownsActiveSession(sessionStartedAt))) return false;
+  await setState(statePatch);
+  try {
+    await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+  } catch (_) {
+    /* ignore */
+  }
+  return true;
+}
+
+function findSongPageTransportButton() {
+  const buttons = Array.from(document.querySelectorAll("button[aria-label]"));
+  const candidates = buttons.filter((btn) => {
+    if (!isShown(btn)) return false;
+    const label = (btn.getAttribute("aria-label") || "").toLowerCase();
+    if (label.includes("playbar")) return false;
+    if (!/\b(play|pause)\b/.test(label)) return false;
+    if (/\b(skip|next|previous|prev|shuffle|repeat|volume|queue|like|share)\b/.test(label)) return false;
+    return true;
+  });
+  candidates.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+  return candidates[0] || null;
+}
+
+function songPagePlaybackActive() {
+  const media = findPlayingMedia();
+  if (media && !media.paused && media.currentTime > 0.05) return true;
+  const btn = findSongPageTransportButton();
+  return Boolean(btn && buttonShowsPause(btn));
+}
+
+function readSongPageTrack() {
+  const match = location.pathname.match(/\/song\/([^/?#]+)/);
+  const id = match ? match[1] : "";
+  if (typeof coverAltTitle === "function") {
+    for (const img of Array.from(document.images)) {
+      if (!isShown(img)) continue;
+      const alt = img.alt || "";
+      if (!/^image for /i.test(alt)) continue;
+      const title = coverAltTitle(alt);
+      if (title) return { title, id };
+    }
+  }
+  const heading = document.querySelector("h1");
+  if (heading && isShown(heading)) {
+    const title = (heading.textContent || "").replace(/\s+/g, " ").trim();
+    if (title) return { title, id };
+  }
+  return { title: "", id };
+}
+
+async function waitForSongPageReady(log, sessionStartedAt) {
+  const deadline = Date.now() + 120_000;
+  while (!stopRequested && Date.now() < deadline) {
+    if (!(await ownsActiveSession(sessionStartedAt))) return null;
+    if (location.pathname.includes("/song/")) {
+      const track = readSongPageTrack();
+      if (track.title) return track;
+    }
+    for (const row of collectVisibleRows()) {
+      if (row.title && panelShowsTitle(row.title)) return { title: row.title, id: "" };
+    }
+    await sleep(250);
+  }
+  return null;
+}
+
+async function waitForSongPageUserPlay(log, sessionStartedAt) {
+  log(ONE_SONG_PAGE_PROMPT);
+  let ticks = 0;
+  while (!stopRequested) {
+    if (!(await ownsActiveSession(sessionStartedAt))) return false;
+    let state = null;
+    try {
+      state = await getState();
+    } catch (_) {
+      await sleep(300);
+      continue;
+    }
+    if (!state || userEndedSession(state)) {
+      stopRequested = true;
+      break;
+    }
+    if (songPagePlaybackActive()) return true;
+    ticks += 1;
+    if (ticks % 10 === 0) touchHeartbeat();
+    if (ticks % 50 === 0) log(ONE_SONG_PAGE_PROMPT);
+    await sleep(200);
+  }
+  return false;
+}
 
 // No deadline. An empty play bar is not a failure. Tab-capture startup has
 // its own timeout and must not be consulted here. Stop is the only cancel.
 async function waitForPlaybarTitle(log) {
-  log(ONE_SONG_PROMPT);
+  log(ONE_SONG_PAGE_PROMPT);
   const startedAt = Date.now();
   oneSongStartedAt = startedAt;
   await setState({
     status: "collecting",
     mode: "one",
-    prompt: ONE_SONG_PROMPT,
+    prompt: ONE_SONG_PAGE_PROMPT,
     queue: [],
     currentIndex: 0,
     startedAt,
@@ -1128,7 +1246,7 @@ async function waitForPlaybarTitle(log) {
         await setState({
           status: "collecting",
           mode: "one",
-          prompt: ONE_SONG_PROMPT,
+          prompt: ONE_SONG_PAGE_PROMPT,
           queue: [],
           currentIndex: 0,
           startedAt,
@@ -1146,7 +1264,7 @@ async function waitForPlaybarTitle(log) {
     if (track.title) return track;
     ticks += 1;
     if (ticks % 10 === 0) touchHeartbeat();
-    if (ticks % 50 === 0) log(ONE_SONG_PROMPT);
+    if (ticks % 50 === 0) log(ONE_SONG_PAGE_PROMPT);
     await sleep(300);
   }
   return null;
@@ -1156,6 +1274,7 @@ async function supersededOneSong() {
   try {
     const state = await getState();
     if (!state || !state.startedAt || !oneSongStartedAt) return false;
+    if (Number(state.sessionEpoch) && Number(state.sessionEpoch) !== Number(localSessionEpoch)) return true;
     return state.startedAt !== oneSongStartedAt && state.status !== "idle";
   } catch (_) {
     return false;
@@ -2562,35 +2681,132 @@ async function recordPlaybarTrack(track, log) {
   return true;
 }
 
-async function runOneSong(log) {
-  const track = await waitForPlaybarTitle(log);
-  if (!track) {
-    if (await supersededOneSong()) return;
-    log("Capture stopped.");
-    await setState({ status: "idle", stoppedAt: Date.now(), mode: "one" });
+async function recordSongPageTrack(track, log, sessionStartedAt) {
+  if (stopRequested) return false;
+
+  const startResponse = await chrome.runtime.sendMessage({
+    target: "background",
+    type: "startRecording",
+    title: track.title,
+  });
+  if (!startResponse || !startResponse.ok) {
+    log(`  ! recorder failed to start: ${startResponse && startResponse.error ? startResponse.error : "unknown"}`);
+    return false;
+  }
+
+  await sleep(RECORDER_WARMUP_MS);
+  if (stopRequested || !(await ownsActiveSession(sessionStartedAt))) {
     try {
-      await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+      await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
     } catch (_) {
-      /* ignore */
+      /* offscreen may already be gone after Stop */
     }
+    return false;
+  }
+
+  if (!songPagePlaybackActive()) {
+    log("  ! song page playback not detected — discarding");
+    await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
+    return false;
+  }
+  log("  site playback confirmed");
+
+  const media = findPlayingMedia();
+  await waitForTrackEnd(media, log);
+
+  if (stopRequested || !(await ownsActiveSession(sessionStartedAt))) {
+    log("  stop requested — discarding the in-progress track");
+    pauseAllPlayback(log);
+    try {
+      await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
+    } catch (_) {
+      /* offscreen may already be gone after Stop */
+    }
+    return false;
+  }
+
+  pauseAllPlayback(log);
+  await sleep(250);
+
+  const options = await getOptions();
+  const filename = buildRelativePath(options.saveFolder, options.filenamePrefix || "", track.title);
+  const stopResponse = await chrome.runtime.sendMessage({
+    target: "background",
+    type: "stopRecordingAndSave",
+    filename,
+  });
+  if (!stopResponse || !stopResponse.ok) {
+    log(`  ! save failed: ${stopResponse && stopResponse.error ? stopResponse.error : "unknown"}`);
+    return false;
+  }
+  const savedAs = (stopResponse && stopResponse.extension) || "wav";
+  log(`  saved ${filename}.${savedAs}`);
+  try {
+    await saveLyricsAndCover(sidecarTrack(track.title, track), filename, log, "", {
+      allowLibraryScroll: false,
+    });
+  } catch (err) {
+    log(`  ! error saving lyrics/cover (audio was saved): ${err && err.message ? err.message : err}`);
+  }
+  return true;
+}
+
+async function runOneSong(log) {
+  let sessionStartedAt = 0;
+  try {
+    const initial = await getState();
+    sessionStartedAt = Number(initial && initial.startedAt) || Date.now();
+    localSessionEpoch = Number(initial && initial.sessionEpoch) || 0;
+  } catch (_) {
+    sessionStartedAt = Date.now();
+  }
+
+  if (location.pathname.startsWith("/me")) {
+    if (!stopRequested && (await ownsActiveSession(sessionStartedAt))) {
+      await selectFirstLibrarySong(log);
+      log(ONE_SONG_OPEN_DONE);
+    }
+  } else {
+    log(ONE_SONG_PAGE_PROMPT);
+  }
+
+  const track = (await waitForSongPageReady(log, sessionStartedAt)) || { title: "", id: "" };
+  if (!track.title) {
+    if (await supersededOneSong()) return;
+    if (!(await ownsActiveSession(sessionStartedAt))) return;
+    log("Capture stopped.");
+    await endOneSongIfOwner(sessionStartedAt, { status: "idle", stoppedAt: Date.now(), mode: "one" });
     return;
   }
 
-  log(`One song: "${track.title}". Recording until the play bar changes.`);
-  const startedAt = Date.now();
+  const played = await waitForSongPageUserPlay(log, sessionStartedAt);
+  if (!played) {
+    if (await supersededOneSong()) return;
+    if (!(await ownsActiveSession(sessionStartedAt))) return;
+    log("Capture stopped.");
+    await endOneSongIfOwner(sessionStartedAt, { status: "idle", stoppedAt: Date.now(), mode: "one" });
+    return;
+  }
+
+  const capturingStartedAt = Date.now();
   await setState({
     status: "capturing",
     queue: [],
     currentIndex: 0,
     currentTitle: track.title,
     discoveredTotal: 1,
-    startedAt,
+    startedAt: sessionStartedAt,
+    sessionEpoch: localSessionEpoch,
+    capturingStartedAt,
     mode: "one",
+    prompt: ONE_SONG_PAGE_PROMPT,
   });
+
+  log(`One song: "${track.title}". Recording until playback ends.`);
 
   let success = false;
   try {
-    success = await recordPlaybarTrack(track, log);
+    success = await recordSongPageTrack(track, log, sessionStartedAt);
   } catch (err) {
     log(`  ! error capturing "${track.title}": ${err && err.message ? err.message : err}`);
     try {
@@ -2602,15 +2818,14 @@ async function runOneSong(log) {
   }
 
   if (stopRequested) {
-    log("Capture stopped.");
-    await setState({ status: "idle", stoppedAt: Date.now(), mode: "one" });
-    try {
-      await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
-    } catch (_) {
-      /* ignore */
+    if (await ownsActiveSession(sessionStartedAt)) {
+      log("Capture stopped.");
+      await endOneSongIfOwner(sessionStartedAt, { status: "idle", stoppedAt: Date.now(), mode: "one" });
     }
     return;
   }
+
+  if (!(await ownsActiveSession(sessionStartedAt))) return;
 
   if (success) {
     try {
@@ -2621,8 +2836,20 @@ async function runOneSong(log) {
   }
 
   const results = [{ title: track.title, done: true, failed: !success }];
-  await setState({ status: "idle", queue: results, finishedAt: Date.now(), discoveredTotal: 1, mode: "one" });
-  await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+  await setState({
+    status: "idle",
+    queue: results,
+    finishedAt: Date.now(),
+    discoveredTotal: 1,
+    mode: "one",
+    startedAt: sessionStartedAt,
+    sessionEpoch: localSessionEpoch,
+  });
+  try {
+    await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+  } catch (_) {
+    /* ignore */
+  }
   log(success ? `Saved "${track.title}".` : `Did not save "${track.title}".`);
 }
 
@@ -2907,7 +3134,14 @@ async function start() {
 
   // Only begin on explicit "collecting" — ignore "starting" (stream still wiring up).
   if (!state || state.status !== "collecting") return;
+  localSessionEpoch = Number(state.sessionEpoch) || 0;
+  await refreshCaptureTabOwnership();
+  if (!captureTabMatches) return;
   const mode = state.mode === "one" ? "one" : state.mode === "meta" ? "meta" : "library";
+  if (mode === "one" && !location.pathname.startsWith("/me") && !location.pathname.includes("/song/")) {
+    log("Open a library or song page for One song capture.");
+    return;
+  }
   if (mode === "library" && !location.pathname.startsWith("/me")) {
     log("Open suno.com/me — library capture only runs on your library page.");
     return;
