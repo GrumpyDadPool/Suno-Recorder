@@ -1339,113 +1339,6 @@ function pauseMediaElementsOnly() {
   }
 }
 
-// One song step 1/3: pause on the play bar (never a library row). Rewind only after pause lands.
-async function pausePlaybarBeforeOneSongCapture(log, sessionStartedAt) {
-  if (sessionStartedAt && !(await ownsActiveSession(sessionStartedAt))) return false;
-
-  log("  1/3 pause playback (play bar only)");
-
-  if (!wasSongPlaying() && !findActiveMediaElement()) {
-    rewindMediaToStart();
-    return true;
-  }
-
-  log("Song playing. Pausing to start recording...");
-  pauseMediaElementsOnly();
-  await sleep(200);
-
-  if (!pauseRestartConfirmed()) {
-    const pauseTarget = pickPlaybarOnlyPauseTarget();
-    if (!pauseTarget || isLibraryRowTransportButton(pauseTarget)) {
-      log("  ! play-bar pause control not found — not clicking the library");
-      return false;
-    }
-    if (!forceClickPlaybarTransport(pauseTarget)) {
-      log("  ! pause control is not clickable");
-      return false;
-    }
-    await sleep(400);
-  }
-
-  if (
-    !(await waitForPauseRestartConfirmed(
-      log,
-      6000,
-      sessionStartedAt,
-      "  pause confirmed — arming recorder while paused"
-    ))
-  ) {
-    log("  ! pause not confirmed before recording");
-    return false;
-  }
-
-  rewindMediaToStart();
-  await sleep(100);
-  if (!pauseRestartConfirmed()) {
-    log("  ! playback started again before the recorder could arm");
-    return false;
-  }
-  return true;
-}
-
-// One song step 3/3: play on the play bar only. Recorder must already be armed (step 2/3).
-async function startPlaybarPlaybackForOneSongCapture(log, sessionStartedAt) {
-  if (sessionStartedAt && !(await ownsActiveSession(sessionStartedAt))) return false;
-
-  log("  3/3 play-bar play (recorder already armed)");
-
-  const deadline = Date.now() + 10_000;
-  let attempt = 0;
-  while (Date.now() < deadline && !stopRequested) {
-    if (sessionStartedAt && !(await ownsActiveSession(sessionStartedAt))) return false;
-    if (playbarPlaybackUnderway()) {
-      log("  play-bar playback started");
-      return true;
-    }
-
-    const playTargets = pickPlaybarOnlyPlayTargets();
-    if (!playTargets.length) {
-      log("  ! play-bar play control not found — not clicking the library");
-      return false;
-    }
-
-    let clicked = false;
-    for (const btn of playTargets) {
-      if (isLibraryRowTransportButton(btn)) continue;
-      const label = (btn.getAttribute("aria-label") || "").trim();
-      attempt += 1;
-      log(`  click: play-bar (${label || "transport"}) attempt ${attempt}`);
-      if (!forceClickPlaybarTransport(btn)) continue;
-      clicked = true;
-      await sleep(450);
-      if (playbarPlaybackUnderway()) {
-        log("  play-bar playback started");
-        return true;
-      }
-    }
-
-    if (!clicked) {
-      log("  ! play-bar play control is not clickable");
-      return false;
-    }
-
-    await sleep(250);
-  }
-
-  if (!playbarPlaybackUnderway()) {
-    log("  play-bar clicks did not start playback — trying audio element play");
-    nudgePausedMediaPlay();
-    await sleep(400);
-    if (playbarPlaybackUnderway()) {
-      log("  playback started after audio element play");
-      return true;
-    }
-  }
-
-  log("  ! play-bar play did not start playback — discarding");
-  return false;
-}
-
 async function pauseAndRestartPlayback(log, sessionStartedAt, options) {
   const oneSong = Boolean(options && options.oneSong);
   if (sessionStartedAt && !(await ownsActiveSession(sessionStartedAt))) return false;
@@ -1757,7 +1650,6 @@ async function waitForSongPageReady(log, sessionStartedAt, pressAnchor) {
     if (!(await ownsActiveSession(sessionStartedAt))) return null;
     const track = readOneSongTargetTrack();
     if (isUsableSongTitle(track.title)) return track;
-    if (pressAnchor && isUsableSongTitle(pressAnchor.title) && wasSongPlaying()) return pressAnchor;
     await sleep(250);
   }
   return null;
@@ -1767,25 +1659,9 @@ async function waitForSongPageUserPlay(log, sessionStartedAt, pressAnchor) {
   log(ONE_SONG_PAGE_PROMPT);
   const anchorTrack =
     pressAnchor && isUsableSongTitle(pressAnchor.title) ? pressAnchor : readOneSongTargetTrack();
-  const initialPlaying = wasSongPlaying();
-
-  if (initialPlaying && isUsableSongTitle(anchorTrack.title)) {
-    await sleep(350);
-    if (!(await ownsActiveSession(sessionStartedAt))) return false;
-    const settled = readOneSongTargetTrack();
-    if (
-      oneSongTracksMatch(anchorTrack, settled) &&
-      wasSongPlaying() &&
-      (await ownsActiveSession(sessionStartedAt))
-    ) {
-      const armed = await getState();
-      if (!armed || armed.status !== "collecting" || armed.mode !== "one") return false;
-      return true;
-    }
-  }
 
   let ticks = 0;
-  let sawQuiet = !initialPlaying;
+  let sawQuiet = !wasSongPlaying();
   while (!stopRequested) {
     if (!(await ownsActiveSession(sessionStartedAt))) return false;
     let state = null;
@@ -3290,12 +3166,14 @@ async function recordPlaybarTrack(track, log) {
 
 async function recordSongPageTrack(track, log, sessionStartedAt) {
   if (stopRequested) return false;
+  if (!(await ownsActiveSession(sessionStartedAt))) return false;
 
-  if (!(await pausePlaybarBeforeOneSongCapture(log, sessionStartedAt))) {
+  if (!wasSongPlaying()) {
+    log("  ! playback is not running — press play on the song page, then try One song again");
     return false;
   }
 
-  log("  2/3 arming recorder while paused");
+  log("  arming recorder while your playback is running");
   const startResponse = await chrome.runtime.sendMessage({
     target: "background",
     type: "startRecording",
@@ -3305,7 +3183,6 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
     log(`  ! recorder failed to start: ${startResponse && startResponse.error ? startResponse.error : "unknown"}`);
     return false;
   }
-  log("  2/3 recorder armed while paused");
 
   const capturingStartedAt = Date.now();
   await setState({
@@ -3331,11 +3208,16 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
     return false;
   }
 
-  if (!(await startPlaybarPlaybackForOneSongCapture(log, sessionStartedAt))) {
-    log("  ! could not start playback from the play bar — discarding");
-    await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
+  if (!wasSongPlaying()) {
+    log("  ! playback stopped before capture could start — discarding");
+    try {
+      await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
+    } catch (_) {
+      /* ignore */
+    }
     return false;
   }
+
   const media = findActiveMediaElement();
   await waitForTrackEnd(media, log);
 
@@ -3443,7 +3325,7 @@ async function runOneSong(log) {
     return;
   }
 
-  log(`One song: "${track.title}". Pause → arm recorder → play bar play.`);
+  log(`One song: "${track.title}". Recording your playback — the extension will not pause or restart it.`);
 
   if (!(await ownsActiveSession(sessionStartedAt)) || !(await oneSongCaptureArmedOnThisTab())) {
     await clearStaleOneSongWait(log, "One song session ended before capture could start.");
