@@ -650,13 +650,28 @@ function rowLooksPlaying(title) {
 // Find the control that is currently showing a "Pause" affordance — i.e. the
 // thing Suno is actively playing. Prefer the playbar transport, then a generic
 // "Pause" button, then a row that flipped to Pause.
-function findActivePauseButton() {
+function isLibraryRowTransportButton(btn) {
+  if (!btn || !isShown(btn)) return false;
+  const label = btn.getAttribute("aria-label") || "";
+  if (!parseRowLabel(label)) return false;
+  if (label.toLowerCase().includes("playbar")) return false;
+  return true;
+}
+
+function findActivePauseButton(opts) {
+  const playbarOnly = Boolean(opts && opts.playbarOnly);
   const buttons = Array.from(document.querySelectorAll("button[aria-label]"));
   const labelOf = (b) => (b.getAttribute("aria-label") || "").toLowerCase();
+  const playbarNamed = buttons.find(
+    (b) => isShown(b) && labelOf(b).includes("pause") && labelOf(b).includes("playbar")
+  );
+  if (playbarNamed) return playbarNamed;
+  const transportPause = playbarTransportControl(true);
+  if (transportPause && buttonShowsPause(transportPause)) return transportPause;
+  if (playbarOnly) return null;
   return (
-    buttons.find((b) => labelOf(b).includes("pause") && labelOf(b).includes("playbar")) ||
-    buttons.find((b) => /^pause\b/.test(labelOf(b))) ||
-    buttons.find((b) => labelOf(b).includes('pause "')) ||
+    buttons.find((b) => isShown(b) && /^pause\b/.test(labelOf(b)) && !isLibraryRowTransportButton(b)) ||
+    buttons.find((b) => isShown(b) && labelOf(b).includes('pause "') && !isLibraryRowTransportButton(b)) ||
     null
   );
 }
@@ -668,8 +683,17 @@ function findActivePauseButton() {
 // ~0.1-0.8s hitch. So the moment we detect a track boundary we pause the media
 // elements (most immediate) AND click the transport's Pause so Suno's own state
 // agrees and it won't silently resume.
-function pauseAllPlayback(log) {
+async function pauseAllPlayback(log, opts) {
   let acted = false;
+  let playbarOnly = Boolean(opts && opts.playbarOnly);
+  if (!playbarOnly) {
+    try {
+      const state = await getState();
+      playbarOnly = Boolean(state && state.mode === "one");
+    } catch (_) {
+      /* ignore */
+    }
+  }
 
   for (const media of getMediaElements()) {
     if (!media.paused) {
@@ -682,10 +706,13 @@ function pauseAllPlayback(log) {
     }
   }
 
-  const pauseBtn = findActivePauseButton();
+  const pauseBtn = findActivePauseButton({ playbarOnly });
   if (pauseBtn) {
-    forceClick(pauseBtn);
-    acted = true;
+    const target = resolveClickTarget(playbarClickTarget(pauseBtn));
+    if (target) {
+      forceClick(target);
+      acted = true;
+    }
   }
 
   if (log) log(acted ? "  paused playback before encode/download" : "  nothing playing to pause");
@@ -1187,6 +1214,12 @@ function pickPauseTarget() {
   return playbarTransportControl(false) || barPause;
 }
 
+function pickPlaybarOnlyPauseTarget() {
+  const barPause = playbarTransportControl(true);
+  if (barPause && buttonShowsPause(barPause)) return barPause;
+  return playbarTransportControl(false) || barPause;
+}
+
 function pickPlayTargets(pauseTarget) {
   const seen = new Set();
   const list = [];
@@ -1202,14 +1235,28 @@ function pickPlayTargets(pauseTarget) {
   return list;
 }
 
-async function pauseAndRestartPlayback(log, sessionStartedAt) {
+function pickPlaybarOnlyPlayTargets() {
+  const seen = new Set();
+  const list = [];
+  const add = (btn) => {
+    if (!btn || seen.has(btn) || isLibraryRowTransportButton(btn)) return;
+    seen.add(btn);
+    list.push(btn);
+  };
+  add(playbarTransportControl(false));
+  add(playbarTransportControl(true));
+  return list;
+}
+
+async function pauseAndRestartPlayback(log, sessionStartedAt, options) {
+  const oneSong = Boolean(options && options.oneSong);
   if (sessionStartedAt && !(await ownsActiveSession(sessionStartedAt))) return false;
 
   if (!wasSongPlaying()) {
     rewindMediaToStart();
-    const playOnly = findSongPageTransportButton() || playbarTransportControl(false);
+    const playOnly = oneSong ? playbarTransportControl(false) : findSongPageTransportButton() || playbarTransportControl(false);
     if (!playOnly) {
-      log("  ! play control not found");
+      log(oneSong ? "  ! play-bar play control not found — not clicking the library" : "  ! play control not found");
       return false;
     }
     const playClick = resolveClickTarget(playbarClickTarget(playOnly));
@@ -1224,9 +1271,13 @@ async function pauseAndRestartPlayback(log, sessionStartedAt) {
   }
 
   log("Song playing. Pausing to restart...");
-  const pauseTarget = pickPauseTarget();
+  const pauseTarget = oneSong ? pickPlaybarOnlyPauseTarget() : pickPauseTarget();
   if (!pauseTarget) {
-    log("  ! pause control not found");
+    log(oneSong ? "  ! play-bar pause control not found — not clicking the library" : "  ! pause control not found");
+    return false;
+  }
+  if (oneSong && isLibraryRowTransportButton(pauseTarget)) {
+    log("  ! refusing to pause a library row control");
     return false;
   }
   const pauseClick = resolveClickTarget(playbarClickTarget(pauseTarget));
@@ -1243,9 +1294,10 @@ async function pauseAndRestartPlayback(log, sessionStartedAt) {
     return false;
   }
 
-  const playTargets = pickPlayTargets(pauseTarget);
+  const playTargets = oneSong ? pickPlaybarOnlyPlayTargets() : pickPlayTargets(pauseTarget);
   for (const btn of playTargets) {
     if (sessionStartedAt && !(await ownsActiveSession(sessionStartedAt))) return false;
+    if (oneSong && isLibraryRowTransportButton(btn)) continue;
     const target = resolveClickTarget(playbarClickTarget(btn));
     if (!target) continue;
     const label = (target.getAttribute("aria-label") || "").trim();
@@ -1378,6 +1430,7 @@ function findSongPageTransportButton() {
   const buttons = Array.from(document.querySelectorAll("button[aria-label]"));
   const candidates = buttons.filter((btn) => {
     if (!isShown(btn)) return false;
+    if (isLibraryRowTransportButton(btn)) return false;
     const label = (btn.getAttribute("aria-label") || "").toLowerCase();
     if (label.includes("playbar")) return false;
     if (!/\b(play|pause)\b/.test(label)) return false;
@@ -1396,7 +1449,7 @@ function songPagePlaybackActive() {
 }
 
 function readTrackFromPauseLabel() {
-  const prefer = findActivePauseButton();
+  const prefer = findActivePauseButton({ playbarOnly: true });
   if (prefer) {
     const parsed = parseRowLabel(prefer.getAttribute("aria-label") || "");
     if (parsed && /^pause$/i.test(parsed.action) && isUsableSongTitle(parsed.title)) {
@@ -2513,15 +2566,19 @@ async function openSongPanel(title, log, opts) {
   if (panelShowsTitle(title)) return true;
   if (stopRequested) return false;
   const allowLibraryScroll = !opts || opts.allowLibraryScroll !== false;
-  const button = allowLibraryScroll ? await findButtonForPanel(title, log) : findVisibleButtonByTitle(title);
+  const oneSongSidecar = Boolean(opts && opts.oneSongSidecar);
+  const button =
+    oneSongSidecar || !allowLibraryScroll
+      ? findVisibleButtonByTitle(title)
+      : await findButtonForPanel(title, log);
   if (stopRequested) return false;
-  if (button) {
+  if (button && !oneSongSidecar) {
     const target = clickTargetForSongRow(button, title);
     if (target) {
       log(`  opening song panel for "${title}"`);
       clickElement(target);
     }
-  } else if (!allowLibraryScroll) {
+  } else if (!allowLibraryScroll || oneSongSidecar) {
     const bar = readPlaybarTrack();
     const el = playbarTitleElement();
     if (bar.title && titleKey(bar.title) === titleKey(title) && el) {
@@ -2616,7 +2673,10 @@ async function saveLyricsAndCover(track, filename, log, coverSrc, opts) {
   let openFailed = false;
   try {
     if (shouldOpen && !panelShowsTitle(track.title)) {
-      const opened = await ensureSongPanel(track.title, log, { allowLibraryScroll });
+      const opened = await ensureSongPanel(track.title, log, {
+        allowLibraryScroll,
+        oneSongSidecar: Boolean(opts && opts.oneSongSidecar),
+      });
       if (stopRequested) return { failed: false, skippedDownload: false };
       if (!opened) {
         log(`  could not open "${track.title}" — continuing with the next song`);
@@ -2904,7 +2964,7 @@ async function recordPlaybarTrack(track, log) {
 
   if (stopRequested) {
     log("  stop requested — discarding the in-progress track");
-    pauseAllPlayback(log);
+    await pauseAllPlayback(log);
     try {
       await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
     } catch (_) {
@@ -2913,7 +2973,7 @@ async function recordPlaybarTrack(track, log) {
     return false;
   }
 
-  pauseAllPlayback(log);
+  await pauseAllPlayback(log);
   await sleep(250);
 
   const options = await getOptions();
@@ -2962,9 +3022,9 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
     return false;
   }
 
-  const playing = await pauseAndRestartPlayback(log, sessionStartedAt);
+  const playing = await pauseAndRestartPlayback(log, sessionStartedAt, { oneSong: true });
   if (!playing) {
-    log("  ! could not restart playback from the beginning — discarding");
+    log("  ! could not restart playback from the play bar — discarding");
     await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
     return false;
   }
@@ -2975,7 +3035,7 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
 
   if (stopRequested || !(await ownsActiveSession(sessionStartedAt))) {
     log("  stop requested — discarding the in-progress track");
-    pauseAllPlayback(log);
+    await pauseAllPlayback(log);
     try {
       await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
     } catch (_) {
@@ -2984,7 +3044,7 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
     return false;
   }
 
-  pauseAllPlayback(log);
+  await pauseAllPlayback(log);
   await sleep(250);
 
   if (!(await ownsActiveSession(sessionStartedAt))) {
@@ -3015,6 +3075,7 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
   try {
     await saveLyricsAndCover(sidecarTrack(saveTrack.title, saveTrack), filename, log, "", {
       allowLibraryScroll: false,
+      oneSongSidecar: true,
     });
   } catch (err) {
     log(`  ! error saving lyrics/cover (audio was saved): ${err && err.message ? err.message : err}`);
@@ -3173,7 +3234,7 @@ async function playRowAndWait(title, log) {
 
   if (stopRequested) {
     log("  stop requested — discarding the in-progress track");
-    pauseAllPlayback(log);
+    await pauseAllPlayback(log);
     try {
       await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
     } catch (_) {
@@ -3186,7 +3247,7 @@ async function playRowAndWait(title, log) {
   // download below — so Suno's auto-advanced next track can't play under (and
   // hitch) that heavy work or bleed into the capture. The next track is started
   // explicitly by the next loop iteration once this download has settled.
-  pauseAllPlayback(log);
+  await pauseAllPlayback(log);
   await sleep(250);
 
   const options = await getOptions();
