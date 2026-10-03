@@ -2784,6 +2784,61 @@ function playbarTitleElement() {
   return nodes.length ? nodes[nodes.length - 1] : null;
 }
 
+function playbarTitleClickTargets(title) {
+  const wanted = titleKey(title);
+  const out = [];
+  const seen = new Set();
+  const add = (el) => {
+    if (!el || seen.has(el) || !isShown(el)) return;
+    seen.add(el);
+    out.push(el);
+  };
+  const anchor =
+    typeof findVisiblePlaybarAnchor === "function"
+      ? findVisiblePlaybarAnchor(document, { isShown })
+      : null;
+  add(anchor);
+  add(playbarTitleElement());
+  for (const link of Array.from(document.querySelectorAll('a[aria-label*="Playbar"][href*="/song/"]'))) {
+    const track = trackFromPlaybarNode(link);
+    if (wanted && track.title && titleKey(track.title) === wanted) add(link);
+  }
+  const bar = readPlaybarTrack();
+  if (wanted && bar.title && titleKey(bar.title) === wanted) {
+    for (const node of Array.from(document.querySelectorAll('[aria-label*="Playbar: Title"]'))) {
+      add(node);
+    }
+  }
+  return out;
+}
+
+// Song panel openers must not preventDefault on play-bar links (clickElement does).
+function clickOpenPanelTarget(el) {
+  const target = resolveClickTarget(el);
+  if (!target || isRowPlayButton(target) || insidePlayControl(target)) return false;
+  dispatchClickSequence(target);
+  return true;
+}
+
+async function openOneSongSidecarPanel(title, log) {
+  if (panelShowsTitle(title)) return true;
+  if (stopRequested) return false;
+  const targets = playbarTitleClickTargets(title);
+  if (!targets.length) {
+    log(`  no play-bar title control found for "${title}"`);
+    return false;
+  }
+  for (const el of targets) {
+    log(`  opening song panel from the play bar for "${title}"`);
+    clickOpenPanelTarget(el);
+    await sleep(350);
+    if (panelShowsTitle(title)) return true;
+  }
+  const opened = await waitForSongPanel(title, PANEL_OPEN_WAIT_MS);
+  if (!opened) log(`  song panel did not show "${title}"`);
+  return opened;
+}
+
 function panelRow(button) {
   let node = button && button.parentElement;
   for (let depth = 0; depth < 8 && node; depth += 1) {
@@ -2805,22 +2860,23 @@ async function openSongPanel(title, log, opts) {
       ? findVisibleButtonByTitle(title)
       : await findButtonForPanel(title, log);
   if (stopRequested) return false;
+  if (oneSongSidecar) {
+    return openOneSongSidecarPanel(title, log);
+  }
   if (button && !oneSongSidecar) {
     const target = clickTargetForSongRow(button, title);
     if (target) {
       log(`  opening song panel for "${title}"`);
       clickElement(target);
     }
-  } else if (!allowLibraryScroll || oneSongSidecar) {
+  } else if (!allowLibraryScroll) {
     const bar = readPlaybarTrack();
     const el = playbarTitleElement();
     if (bar.title && titleKey(bar.title) === titleKey(title) && el) {
       log(`  opening song panel from the play bar for "${title}"`);
-      clickElement(el);
+      clickOpenPanelTarget(el);
     }
   }
-  // Previously `if (!clicked) return false` logged "song panel did not show"
-  // and the lyrics loop advanced immediately. Wait out the panel instead.
   const opened = await waitForSongPanel(title, PANEL_OPEN_WAIT_MS);
   if (!opened) log(`  song panel did not show "${title}"`);
   return opened;
