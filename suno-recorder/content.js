@@ -757,14 +757,12 @@ function hoverRow(button) {
   }
 }
 
-function forceClick(el) {
-  const target = resolveClickTarget(el);
+function dispatchClickSequence(target, clientPoint) {
   if (!target) return;
   const opts = { bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 };
-  try {
-    target.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-  } catch (_) {
-    /* ignore */
+  if (clientPoint) {
+    opts.clientX = clientPoint.x;
+    opts.clientY = clientPoint.y;
   }
   hoverRow(target);
   if (typeof target.focus === "function") {
@@ -779,6 +777,34 @@ function forceClick(el) {
     target.dispatchEvent(new Ctor(type, opts));
   }
   if (typeof target.click === "function") target.click();
+}
+
+function forceClick(el) {
+  const target = resolveClickTarget(el);
+  if (!target) return;
+  try {
+    target.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+  } catch (_) {
+    /* ignore */
+  }
+  dispatchClickSequence(target);
+}
+
+// Picked play-bar transport: click the button we selected, not elementFromPoint (often misses).
+function forceClickPlaybarTransport(button) {
+  const target = resolveClickTarget(button);
+  if (!target || isLibraryRowTransportButton(target)) return false;
+  dispatchClickSequence(target);
+  if (typeof target.getBoundingClientRect === "function") {
+    const rect = target.getBoundingClientRect();
+    if (rect.width > 2 && rect.height > 2) {
+      dispatchClickSequence(target, {
+        x: rect.left + rect.width * 0.35,
+        y: rect.top + rect.height * 0.5,
+      });
+    }
+  }
+  return true;
 }
 
 async function clickPlayForTitle(title, button, log) {
@@ -1249,17 +1275,28 @@ function pickPlayTargets(pauseTarget) {
   return list;
 }
 
+function isPlaybarLabelledPlayDecoy(btn) {
+  const label = (btn.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+  return /^playbar:\s*play$/i.test(label);
+}
+
 function pickPlaybarOnlyPlayTargets() {
   const seen = new Set();
   const list = [];
+  const scoped =
+    typeof collectTitleScopeTransportButtons === "function"
+      ? collectTitleScopeTransportButtons(document, { isShown })
+      : [];
+  const hasScopedPlay = scoped.some((btn) => isShown(btn) && !buttonShowsPause(btn));
   const add = (btn) => {
     if (!btn || seen.has(btn) || isLibraryRowTransportButton(btn)) return;
     if (buttonShowsPause(btn)) return;
+    if (hasScopedPlay && isPlaybarLabelledPlayDecoy(btn)) return;
     seen.add(btn);
     list.push(btn);
   };
-  const preferPlay = playbarTransportControl(false);
-  add(preferPlay);
+  for (const btn of scoped) add(btn);
+  add(playbarTransportControl(false));
   for (const btn of collectPlaybarTransportButtons()) {
     if (isShown(btn)) add(btn);
   }
@@ -1323,12 +1360,10 @@ async function pausePlaybarBeforeOneSongCapture(log, sessionStartedAt) {
       log("  ! play-bar pause control not found — not clicking the library");
       return false;
     }
-    const pauseClick = resolveClickTarget(playbarClickTarget(pauseTarget));
-    if (!pauseClick) {
+    if (!forceClickPlaybarTransport(pauseTarget)) {
       log("  ! pause control is not clickable");
       return false;
     }
-    forceClick(pauseClick);
     await sleep(400);
   }
 
@@ -1377,14 +1412,12 @@ async function startPlaybarPlaybackForOneSongCapture(log, sessionStartedAt) {
     let clicked = false;
     for (const btn of playTargets) {
       if (isLibraryRowTransportButton(btn)) continue;
-      const target = resolveClickTarget(playbarClickTarget(btn));
-      if (!target) continue;
-      const label = (target.getAttribute("aria-label") || "").trim();
+      const label = (btn.getAttribute("aria-label") || "").trim();
       attempt += 1;
-      log(`  click: play (${label || "transport"}) attempt ${attempt}`);
-      forceClick(target);
+      log(`  click: play-bar (${label || "transport"}) attempt ${attempt}`);
+      if (!forceClickPlaybarTransport(btn)) continue;
       clicked = true;
-      await sleep(400);
+      await sleep(450);
       if (playbarPlaybackUnderway()) {
         log("  play-bar playback started");
         return true;
@@ -1396,16 +1429,17 @@ async function startPlaybarPlaybackForOneSongCapture(log, sessionStartedAt) {
       return false;
     }
 
-    if (attempt >= 3 && !playbarPlaybackUnderway()) {
-      nudgePausedMediaPlay();
-      await sleep(300);
-      if (playbarPlaybackUnderway()) {
-        log("  playback started after media nudge");
-        return true;
-      }
-    }
-
     await sleep(250);
+  }
+
+  if (!playbarPlaybackUnderway()) {
+    log("  play-bar clicks did not start playback — trying audio element play");
+    nudgePausedMediaPlay();
+    await sleep(400);
+    if (playbarPlaybackUnderway()) {
+      log("  playback started after audio element play");
+      return true;
+    }
   }
 
   log("  ! play-bar play did not start playback — discarding");
