@@ -1038,10 +1038,31 @@ function buttonShowsPause(btn) {
 // do not say Playbar. Skip, next, and the title link are not the play control.
 function findPlaybarTransportButton(opts) {
   const preferPause = opts && Object.prototype.hasOwnProperty.call(opts, "preferPause") ? opts.preferPause : undefined;
+  const anchor = typeof findVisiblePlaybarAnchor === "function" ? findVisiblePlaybarAnchor() : null;
   return pickPlaybarTransportButton(collectPlaybarTransportButtons(), preferPause, {
     isShown,
     buttonShowsPause,
+    anchor,
   });
+}
+
+function playbarClickTarget(button) {
+  if (!button || typeof button.getBoundingClientRect !== "function") return button;
+  const rect = button.getBoundingClientRect();
+  if (rect.width <= 1 || rect.height <= 1) return button;
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+  let hit = null;
+  try {
+    hit = document.elementFromPoint(x, y);
+  } catch (_) {
+    return button;
+  }
+  if (!hit) return button;
+  if (button === hit || button.contains(hit)) return hit;
+  const interactive = hit.closest ? hit.closest("button,[role='button']") : null;
+  if (interactive && (button === interactive || button.contains(interactive))) return interactive;
+  return button;
 }
 
 function playbarMediaIsPaused() {
@@ -1232,9 +1253,11 @@ async function clickPlaybarPlay(log) {
   } else {
     rewindMediaToStart();
   }
-  const clickLabel = (button.getAttribute("aria-label") || "").trim() || "play bar transport";
+  const clickTarget = playbarClickTarget(button);
+  const clickLabel = (clickTarget.getAttribute("aria-label") || button.getAttribute("aria-label") || "")
+    .trim() || "play bar transport";
   log(`  click: play bar play (${clickLabel})`);
-  forceClick(button);
+  forceClick(clickTarget);
   const deadline = Date.now() + 8000;
   let retried = false;
   while (Date.now() < deadline) {

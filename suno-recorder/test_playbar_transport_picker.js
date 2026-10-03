@@ -5,13 +5,17 @@ const {
   collectPlaybarTransportButtons,
 } = require("./playbar_transport_picker.js");
 
-function mockButton({ label, pause, shown = true }) {
+function mockButton({ label, pause, shown = true, rect = { height: 40, width: 40, top: 800, bottom: 840 } }) {
   return {
     shown,
+    pause,
+    rect,
     getAttribute(name) {
       return name === "aria-label" ? label : "";
     },
-    pause,
+    getBoundingClientRect() {
+      return this.rect;
+    },
   };
 }
 
@@ -77,6 +81,7 @@ function mockScopeTree() {
     getAttribute(name) {
       return name === "aria-label" ? "Playbar: Title" : "";
     },
+    getBoundingClientRect: () => ({ height: 24, width: 120, top: 800, bottom: 824 }),
   };
 
   const doc = {
@@ -99,18 +104,8 @@ assert.deepStrictEqual(
   "title-scope walk should keep climbing past hidden-only transport controls"
 );
 
-function mockButtonInTree({ label, pause, shown = true, rect = { height: 40, width: 40, top: 800, bottom: 840 } }) {
-  return {
-    shown,
-    pause,
-    rect,
-    getAttribute(name) {
-      return name === "aria-label" ? label : "";
-    },
-    getBoundingClientRect() {
-      return this.rect;
-    },
-  };
+function mockButtonInTree(opts) {
+  return mockButton(opts);
 }
 
 function mockDocWithDecoyLabelledPlay() {
@@ -174,9 +169,68 @@ assert.strictEqual(
   pickPlaybarTransportButton(collected, false, {
     isShown: (btn) => btn.shown,
     buttonShowsPause: (btn) => btn.pause,
+    anchor: decoyDoc.titleNode,
   }),
   decoyDoc.realPlay,
   "One song should click the title-scope Play control, not Playbar: Play decoy"
+);
+
+function mockDocWithTwoVisibleTitles() {
+  const upperDecoyPlay = mockButton({
+    label: "Playbar: Play",
+    pause: false,
+    shown: true,
+    rect: { height: 40, width: 40, top: 40, bottom: 80 },
+  });
+  const realPlay = mockButton({ label: "Play", pause: false, shown: true, rect: { height: 40, width: 40, top: 800, bottom: 840 } });
+
+  const innerScope = {
+    parentElement: null,
+    getBoundingClientRect: () => ({ height: 72 }),
+    querySelectorAll(sel) {
+      if (sel === "button[aria-label]") return [realPlay];
+      return [];
+    },
+  };
+  innerScope.parentElement = innerScope;
+
+  const upperTitle = {
+    parentElement: innerScope,
+    shown: true,
+    getAttribute(name) {
+      return name === "aria-label" ? "Playbar: Title" : "";
+    },
+    getBoundingClientRect: () => ({ height: 24, width: 120, top: 20, bottom: 44 }),
+  };
+  const lowerTitle = {
+    parentElement: innerScope,
+    shown: true,
+    getAttribute(name) {
+      return name === "aria-label" ? "Playbar: Title for My Song" : "";
+    },
+    getBoundingClientRect: () => ({ height: 24, width: 120, top: 820, bottom: 844 }),
+  };
+
+  const doc = {
+    querySelectorAll(sel) {
+      if (sel === "button[aria-label]") return [upperDecoyPlay, realPlay];
+      if (sel === '[aria-label*="Playbar: Title"]') return [upperTitle, lowerTitle];
+      if (sel === 'a[aria-label*="Playbar"][href*="/song/"]') return [];
+      return [];
+    },
+  };
+
+  return { doc, realPlay, lowerTitle };
+}
+
+const twoTitles = mockDocWithTwoVisibleTitles();
+const collectedFromBottomBar = collectPlaybarTransportButtons(twoTitles.doc, {
+  isShown: (btn) => btn.shown,
+});
+assert.deepStrictEqual(
+  collectedFromBottomBar,
+  [twoTitles.realPlay],
+  "anchor the bottom-most visible play-bar title, not an upper shell"
 );
 
 console.log("playbar_transport_picker ok");
