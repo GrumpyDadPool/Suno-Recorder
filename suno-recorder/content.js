@@ -1072,6 +1072,30 @@ function playbarMediaIsPaused() {
   return media.every((m) => m.paused || m.ended);
 }
 
+function playbarTransportControl(preferPause) {
+  const opts = preferPause === undefined ? {} : { preferPause };
+  const btn = findPlaybarTransportButton(opts);
+  return btn && isShown(btn) ? btn : null;
+}
+
+// Row and song-page controls also use Pause "Title". They must not stand in for
+// the bottom play-bar transport when arming a play-bar pause/restart.
+function playbarTransportShowsPause() {
+  const btn = playbarTransportControl(true);
+  return Boolean(btn && buttonShowsPause(btn));
+}
+
+function playbarTransportShowsPlay() {
+  const btn = playbarTransportControl(false);
+  return Boolean(btn && !buttonShowsPause(btn));
+}
+
+function playbarTransportPauseLanded() {
+  if (playbarTransportShowsPlay()) return true;
+  const mediaQuiet = playbarMediaIsPaused() || !findPlayingMedia();
+  return mediaQuiet && !playbarTransportShowsPause();
+}
+
 function rewindMediaToStart() {
   for (const media of getMediaElements()) {
     try {
@@ -1329,7 +1353,7 @@ async function waitForPlaybarChange(initial, log) {
 
 async function clickPlaybarPlay(log) {
   const playingBefore =
-    Boolean(findPlayingMedia()) || isPlaybarPlaying() || buttonShowsPause(findPlaybarTransportButton({ preferPause: true }));
+    Boolean(findPlayingMedia()) || playbarTransportShowsPause();
   let button = findPlaybarTransportButton({ preferPause: playingBefore });
   if (!button) {
     log("  ! play bar play button not found");
@@ -1337,27 +1361,30 @@ async function clickPlaybarPlay(log) {
   }
   if (buttonShowsPause(button)) {
     log("  pausing the play bar so the song can start from the beginning");
-    forceClick(button);
+    forceClick(playbarClickTarget(button));
     await sleep(350);
     rewindMediaToStart();
     await sleep(200);
     button = null;
     for (let attempt = 0; attempt < 30 && !stopRequested; attempt += 1) {
-      const found = findPlaybarTransportButton({ preferPause: false });
-      if (found && !buttonShowsPause(found)) {
-        button = found;
-        break;
+      if (playbarTransportShowsPlay()) {
+        button = playbarTransportControl(false);
+        if (button) {
+          log("  play bar paused — transport shows play");
+          break;
+        }
       }
-      if (playbarMediaIsPaused() && !isPlaybarPlaying()) {
-        const fallback = findPlaybarTransportButton({ preferPause: false });
+      if (playbarTransportPauseLanded()) {
+        const fallback = playbarTransportControl(false);
         if (fallback) {
           button = fallback;
+          log("  play bar paused — media stopped and play control is available");
           break;
         }
       }
       if (attempt === 7 || attempt === 15) {
-        const pauseAgain = findPlaybarTransportButton({ preferPause: true });
-        if (pauseAgain && buttonShowsPause(pauseAgain)) forceClick(pauseAgain);
+        const pauseAgain = playbarTransportControl(true);
+        if (pauseAgain && buttonShowsPause(pauseAgain)) forceClick(playbarClickTarget(pauseAgain));
       }
       await sleep(200);
     }
@@ -1365,9 +1392,12 @@ async function clickPlaybarPlay(log) {
       log("  ! play bar play button not found after pausing for restart");
       return false;
     }
-    if (buttonShowsPause(button)) {
+    if (buttonShowsPause(button) && !playbarTransportPauseLanded()) {
       log("  ! play bar still shows pause after pausing — could not arm play for restart");
       return false;
+    }
+    if (buttonShowsPause(button)) {
+      button = playbarTransportControl(false) || button;
     }
   } else {
     rewindMediaToStart();
@@ -1381,8 +1411,14 @@ async function clickPlaybarPlay(log) {
   let retried = false;
   while (Date.now() < deadline) {
     if (stopRequested) return false;
-    const again = findPlaybarTransportButton({ preferPause: true });
-    if (isPlaybarPlaying() || findPlayingMedia() || (again && isShown(again) && buttonShowsPause(again))) return true;
+    const again = playbarTransportControl(true);
+    if (
+      playbarTransportShowsPause() ||
+      findPlayingMedia() ||
+      (again && buttonShowsPause(again))
+    ) {
+      return true;
+    }
     if (!retried && Date.now() > deadline - 6000) {
       retried = true;
       const retry = findPlaybarTransportButton({ preferPause: false });
@@ -2704,8 +2740,9 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
     return false;
   }
 
-  if (!songPagePlaybackActive()) {
-    log("  ! song page playback not detected — discarding");
+  const playing = await clickPlaybarPlay(log);
+  if (!playing) {
+    log("  ! could not restart playback from the beginning — discarding");
     await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
     return false;
   }
