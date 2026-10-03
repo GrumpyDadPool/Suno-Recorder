@@ -1408,8 +1408,28 @@ async function waitForSongPageReady(log, sessionStartedAt) {
 
 async function waitForSongPageUserPlay(log, sessionStartedAt) {
   log(ONE_SONG_PAGE_PROMPT);
+  const anchorTrack = readSongPageTrack();
+  const initialPlaying = songPagePlaybackActive() || Boolean(findPlayingMedia());
+
+  if (initialPlaying && anchorTrack.title) {
+    await sleep(350);
+    if (!(await ownsActiveSession(sessionStartedAt))) return false;
+    const settled = readSongPageTrack();
+    const sameSong =
+      anchorTrack.id && settled.id
+        ? anchorTrack.id === settled.id
+        : titleKey(anchorTrack.title) === titleKey(settled.title);
+    if (
+      sameSong &&
+      (songPagePlaybackActive() || findPlayingMedia()) &&
+      (await ownsActiveSession(sessionStartedAt))
+    ) {
+      return true;
+    }
+  }
+
   let ticks = 0;
-  let sawQuiet = !(songPagePlaybackActive() || findPlayingMedia());
+  let sawQuiet = !initialPlaying;
   while (!stopRequested) {
     if (!(await ownsActiveSession(sessionStartedAt))) return false;
     let state = null;
@@ -1424,8 +1444,13 @@ async function waitForSongPageUserPlay(log, sessionStartedAt) {
       break;
     }
     const playingNow = songPagePlaybackActive() || Boolean(findPlayingMedia());
+    const current = readSongPageTrack();
+    const sameSong =
+      anchorTrack.id && current.id
+        ? anchorTrack.id === current.id
+        : !anchorTrack.title || titleKey(current.title) === titleKey(anchorTrack.title);
     if (!playingNow) sawQuiet = true;
-    if (sawQuiet && playingNow) return true;
+    if (sawQuiet && playingNow && sameSong) return true;
     ticks += 1;
     if (ticks % 10 === 0) touchHeartbeat();
     if (ticks % 50 === 0) log(ONE_SONG_PAGE_PROMPT);
@@ -2944,7 +2969,7 @@ async function runOneSong(log) {
     log(ONE_SONG_PAGE_PROMPT);
   }
 
-  const track = (await waitForSongPageReady(log, sessionStartedAt)) || { title: "", id: "" };
+  let track = (await waitForSongPageReady(log, sessionStartedAt)) || { title: "", id: "" };
   if (!track.title) {
     if (await supersededOneSong()) return;
     if (!(await ownsActiveSession(sessionStartedAt))) return;
