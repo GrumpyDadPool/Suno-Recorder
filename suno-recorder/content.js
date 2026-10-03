@@ -1128,9 +1128,10 @@ function wasSongPlaying() {
   );
 }
 
-async function waitForPauseRestartConfirmed(log, deadlineMs) {
+async function waitForPauseRestartConfirmed(log, deadlineMs, sessionStartedAt) {
   const deadline = Date.now() + deadlineMs;
   while (Date.now() < deadline && !stopRequested) {
+    if (sessionStartedAt && !(await ownsActiveSession(sessionStartedAt))) return false;
     if (pauseRestartConfirmed()) {
       log("  pause confirmed — restarting playback");
       return true;
@@ -1140,9 +1141,10 @@ async function waitForPauseRestartConfirmed(log, deadlineMs) {
   return false;
 }
 
-async function waitForPlaybackResumed(deadlineMs) {
+async function waitForPlaybackResumed(deadlineMs, sessionStartedAt) {
   const deadline = Date.now() + deadlineMs;
   while (Date.now() < deadline && !stopRequested) {
+    if (sessionStartedAt && !(await ownsActiveSession(sessionStartedAt))) return false;
     if (findPlayingMedia()) return true;
     if (playbarTransportShowsPause()) return true;
     if (songPageTransportShowsPause()) return true;
@@ -1175,7 +1177,9 @@ function pickPlayTargets(pauseTarget) {
   return list;
 }
 
-async function pauseAndRestartPlayback(log) {
+async function pauseAndRestartPlayback(log, sessionStartedAt) {
+  if (sessionStartedAt && !(await ownsActiveSession(sessionStartedAt))) return false;
+
   if (!wasSongPlaying()) {
     rewindMediaToStart();
     const playOnly = findSongPageTransportButton() || playbarTransportControl(false);
@@ -1186,7 +1190,7 @@ async function pauseAndRestartPlayback(log) {
     const label = (playOnly.getAttribute("aria-label") || "").trim();
     log(`  click: play (${label || "transport"})`);
     forceClick(playbarClickTarget(playOnly));
-    return waitForPlaybackResumed(8000);
+    return waitForPlaybackResumed(8000, sessionStartedAt);
   }
 
   log("Song playing. Pausing to restart...");
@@ -1199,18 +1203,19 @@ async function pauseAndRestartPlayback(log) {
   await sleep(400);
   rewindMediaToStart();
 
-  if (!(await waitForPauseRestartConfirmed(log, 6000))) {
+  if (!(await waitForPauseRestartConfirmed(log, 6000, sessionStartedAt))) {
     log("  ! pause not confirmed before restart");
     return false;
   }
 
   const playTargets = pickPlayTargets(pauseTarget);
   for (const btn of playTargets) {
+    if (sessionStartedAt && !(await ownsActiveSession(sessionStartedAt))) return false;
     const target = playbarClickTarget(btn);
     const label = (target.getAttribute("aria-label") || "").trim();
     log(`  click: play (${label || "transport"})`);
     forceClick(target);
-    if (await waitForPlaybackResumed(4000)) return true;
+    if (await waitForPlaybackResumed(4000, sessionStartedAt)) return true;
     await sleep(250);
   }
 
@@ -1274,6 +1279,65 @@ async function endOneSongIfOwner(sessionStartedAt, statePatch) {
   return true;
 }
 
+async function failOneSongCapture(sessionStartedAt, trackTitle, message, log) {
+  if (!(await ownsActiveSession(sessionStartedAt))) return;
+  log(message);
+  try {
+    await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
+  } catch (_) {
+    /* offscreen may already be gone */
+  }
+  await setState({
+    status: "idle",
+    failedAt: Date.now(),
+    mode: "one",
+    queue: [{ title: trackTitle || "", done: false, failed: true }],
+    finishedAt: Date.now(),
+    discoveredTotal: 1,
+    startedAt: sessionStartedAt,
+    sessionEpoch: localSessionEpoch,
+  });
+  try {
+    await chrome.storage.local.set({ sunoCaptureError: message });
+  } catch (_) {
+    /* ignore */
+  }
+  try {
+    await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+async function finishOneSongCapture(sessionStartedAt, track, success, log) {
+  if (!(await ownsActiveSession(sessionStartedAt))) return;
+
+  if (success) {
+    try {
+      await rememberRecordedTitle(track.title);
+    } catch (err) {
+      log(`  ! could not update the recorded-song list: ${err && err.message ? err.message : err}`);
+    }
+  }
+
+  const results = [{ title: track.title, done: true, failed: !success }];
+  await setState({
+    status: "idle",
+    queue: results,
+    finishedAt: Date.now(),
+    discoveredTotal: 1,
+    mode: "one",
+    startedAt: sessionStartedAt,
+    sessionEpoch: localSessionEpoch,
+  });
+  try {
+    await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
+  } catch (_) {
+    /* ignore */
+  }
+  log(success ? `Saved "${track.title}".` : `Did not save "${track.title}".`);
+}
+
 function findSongPageTransportButton() {
   const buttons = Array.from(document.querySelectorAll("button[aria-label]"));
   const candidates = buttons.filter((btn) => {
@@ -1298,20 +1362,31 @@ function songPagePlaybackActive() {
 function readSongPageTrack() {
   const match = location.pathname.match(/\/song\/([^/?#]+)/);
   const id = match ? match[1] : "";
-  if (typeof coverAltTitle === "function") {
-    for (const img of Array.from(document.images)) {
-      if (!isShown(img)) continue;
-      const alt = img.alt || "";
-      if (!/^image for /i.test(alt)) continue;
-      const title = coverAltTitle(alt);
-      if (title) return { title, id };
-    }
-  }
+
   const heading = document.querySelector("h1");
   if (heading && isShown(heading)) {
     const title = (heading.textContent || "").replace(/\s+/g, " ").trim();
     if (title) return { title, id };
   }
+
+  if (typeof coverAltTitle === "function") {
+    const covers = [];
+    for (const img of Array.from(document.images)) {
+      if (!isShown(img)) continue;
+      const alt = img.alt || "";
+      if (!/^image for /i.test(alt)) continue;
+      const title = coverAltTitle(alt);
+      if (!title) continue;
+      const rect = img.getBoundingClientRect();
+      covers.push({ title, area: rect.width * rect.height, top: rect.top });
+    }
+    covers.sort((a, b) => {
+      if (b.area !== a.area) return b.area - a.area;
+      return a.top - b.top;
+    });
+    if (covers.length) return { title: covers[0].title, id };
+  }
+
   return { title: "", id };
 }
 
@@ -1334,6 +1409,7 @@ async function waitForSongPageReady(log, sessionStartedAt) {
 async function waitForSongPageUserPlay(log, sessionStartedAt) {
   log(ONE_SONG_PAGE_PROMPT);
   let ticks = 0;
+  let sawQuiet = !(songPagePlaybackActive() || findPlayingMedia());
   while (!stopRequested) {
     if (!(await ownsActiveSession(sessionStartedAt))) return false;
     let state = null;
@@ -1347,7 +1423,9 @@ async function waitForSongPageUserPlay(log, sessionStartedAt) {
       stopRequested = true;
       break;
     }
-    if (songPagePlaybackActive()) return true;
+    const playingNow = songPagePlaybackActive() || Boolean(findPlayingMedia());
+    if (!playingNow) sawQuiet = true;
+    if (sawQuiet && playingNow) return true;
     ticks += 1;
     if (ticks % 10 === 0) touchHeartbeat();
     if (ticks % 50 === 0) log(ONE_SONG_PAGE_PROMPT);
@@ -1473,8 +1551,8 @@ async function waitForPlaybarChange(initial, log) {
   log("  hit per-track time cap");
 }
 
-async function clickPlaybarPlay(log) {
-  return pauseAndRestartPlayback(log);
+async function clickPlaybarPlay(log, sessionStartedAt) {
+  return pauseAndRestartPlayback(log, sessionStartedAt);
 }
 
 function playbarRootElement() {
@@ -2787,7 +2865,7 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
     return false;
   }
 
-  const playing = await pauseAndRestartPlayback(log);
+  const playing = await pauseAndRestartPlayback(log, sessionStartedAt);
   if (!playing) {
     log("  ! could not restart playback from the beginning — discarding");
     await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
@@ -2812,8 +2890,20 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
   pauseAllPlayback(log);
   await sleep(250);
 
+  if (!(await ownsActiveSession(sessionStartedAt))) {
+    try {
+      await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
+    } catch (_) {
+      /* ignore */
+    }
+    return false;
+  }
+
+  const freshTrack = readSongPageTrack();
+  const saveTrack = freshTrack.title ? freshTrack : track;
+
   const options = await getOptions();
-  const filename = buildRelativePath(options.saveFolder, options.filenamePrefix || "", track.title);
+  const filename = buildRelativePath(options.saveFolder, options.filenamePrefix || "", saveTrack.title);
   const stopResponse = await chrome.runtime.sendMessage({
     target: "background",
     type: "stopRecordingAndSave",
@@ -2826,7 +2916,7 @@ async function recordSongPageTrack(track, log, sessionStartedAt) {
   const savedAs = (stopResponse && stopResponse.extension) || "wav";
   log(`  saved ${filename}.${savedAs}`);
   try {
-    await saveLyricsAndCover(sidecarTrack(track.title, track), filename, log, "", {
+    await saveLyricsAndCover(sidecarTrack(saveTrack.title, saveTrack), filename, log, "", {
       allowLibraryScroll: false,
     });
   } catch (err) {
@@ -2872,6 +2962,9 @@ async function runOneSong(log) {
     return;
   }
 
+  const freshBeforeCapture = readSongPageTrack();
+  if (freshBeforeCapture.title) track = freshBeforeCapture;
+
   const capturingStartedAt = Date.now();
   await setState({
     status: "capturing",
@@ -2892,18 +2985,19 @@ async function runOneSong(log) {
   try {
     success = await recordSongPageTrack(track, log, sessionStartedAt);
   } catch (err) {
-    log(`  ! error capturing "${track.title}": ${err && err.message ? err.message : err}`);
-    try {
-      await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
-    } catch (_) {
-      /* ignore */
-    }
-    success = false;
+    const message = `Could not record "${track.title}": ${err && err.message ? err.message : err}`;
+    await failOneSongCapture(sessionStartedAt, track.title, message, log);
+    return;
   }
 
   if (stopRequested) {
     if (await ownsActiveSession(sessionStartedAt)) {
       log("Capture stopped.");
+      try {
+        await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
+      } catch (_) {
+        /* ignore */
+      }
       await endOneSongIfOwner(sessionStartedAt, { status: "idle", stoppedAt: Date.now(), mode: "one" });
     }
     return;
@@ -2911,30 +3005,17 @@ async function runOneSong(log) {
 
   if (!(await ownsActiveSession(sessionStartedAt))) return;
 
-  if (success) {
-    try {
-      await rememberRecordedTitle(track.title);
-    } catch (err) {
-      log(`  ! could not update the recorded-song list: ${err && err.message ? err.message : err}`);
-    }
+  if (!success) {
+    await failOneSongCapture(
+      sessionStartedAt,
+      track.title,
+      `Could not record "${track.title}". Check the song page play button and try One song again.`,
+      log
+    );
+    return;
   }
 
-  const results = [{ title: track.title, done: true, failed: !success }];
-  await setState({
-    status: "idle",
-    queue: results,
-    finishedAt: Date.now(),
-    discoveredTotal: 1,
-    mode: "one",
-    startedAt: sessionStartedAt,
-    sessionEpoch: localSessionEpoch,
-  });
-  try {
-    await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
-  } catch (_) {
-    /* ignore */
-  }
-  log(success ? `Saved "${track.title}".` : `Did not save "${track.title}".`);
+  await finishOneSongCapture(sessionStartedAt, track, true, log);
 }
 
 async function playRowAndWait(title, log) {
@@ -3198,6 +3279,15 @@ async function start() {
   if (SCRIPT_GENERATION !== globalThis.__sunoRecorderGeneration) return;
   if (sessionRunning) {
     startPending = true;
+    try {
+      const state = await getState();
+      const incomingEpoch = Number(state && state.sessionEpoch) || 0;
+      if (incomingEpoch && incomingEpoch !== localSessionEpoch) {
+        stopRequested = true;
+      }
+    } catch (_) {
+      /* ignore */
+    }
     return;
   }
   if (!runtimeAlive()) {
@@ -3271,7 +3361,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.sunoCaptureState) {
     const newState = changes.sunoCaptureState.newValue;
     if (newState && newState.status === "collecting") {
-      start();
+      const epoch = Number(newState.sessionEpoch) || 0;
+      if (!(sessionRunning && epoch && epoch === localSessionEpoch)) {
+        start();
+      }
     }
     // Honor Stop immediately. The popup writes { status: "idle", stoppedAt } —
     // flag it so an in-flight session aborts the current track right away.

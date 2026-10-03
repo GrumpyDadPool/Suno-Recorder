@@ -197,6 +197,11 @@ async function beginSession(mode) {
       sunoCaptureState: { status: "idle", resetAt: Date.now() },
     });
     try {
+      await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
+    } catch (_) {
+      /* no active recorder */
+    }
+    try {
       await chrome.runtime.sendMessage({ target: "background", type: "endSession" });
     } catch (_) {
       /* ignore */
@@ -330,6 +335,11 @@ lyricsBtn.addEventListener("click", () => beginLyricsAndCovers());
 
 stopBtn.addEventListener("click", async () => {
   try {
+    try {
+      await chrome.runtime.sendMessage({ target: "background", type: "discardRecording" });
+    } catch (_) {
+      /* no active recorder */
+    }
     await chrome.storage.local.set({
       sunoCaptureState: { status: "idle", stoppedAt: Date.now() },
     });
