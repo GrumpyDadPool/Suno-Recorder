@@ -1258,11 +1258,38 @@ function pickPlaybarOnlyPlayTargets() {
     seen.add(btn);
     list.push(btn);
   };
-  add(playbarTransportControl(false));
+  const preferPlay = playbarTransportControl(false);
+  add(preferPlay);
   for (const btn of collectPlaybarTransportButtons()) {
     if (isShown(btn)) add(btn);
   }
   return list;
+}
+
+function playbarPlaybackUnderway() {
+  const media = findActiveMediaElement();
+  if (media && !media.paused) return true;
+  if (playbarTransportShowsPause()) return true;
+  if (isPlaybarPlaying()) return true;
+  return false;
+}
+
+function nudgePausedMediaPlay() {
+  let nudged = false;
+  for (const media of getMediaElements()) {
+    try {
+      if (media.paused || media.ended) {
+        const playPromise = media.play();
+        if (playPromise && typeof playPromise.catch === "function") {
+          playPromise.catch(() => {});
+        }
+        nudged = true;
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  return nudged;
 }
 
 function pauseMediaElementsOnly() {
@@ -1332,25 +1359,56 @@ async function startPlaybarPlaybackForOneSongCapture(log, sessionStartedAt) {
 
   log("  3/3 play-bar play (recorder already armed)");
 
-  const playTargets = pickPlaybarOnlyPlayTargets();
-  if (!playTargets.length) {
-    log("  ! play-bar play control not found — not clicking the library");
-    return false;
-  }
-
-  for (const btn of playTargets) {
+  const deadline = Date.now() + 10_000;
+  let attempt = 0;
+  while (Date.now() < deadline && !stopRequested) {
     if (sessionStartedAt && !(await ownsActiveSession(sessionStartedAt))) return false;
-    if (isLibraryRowTransportButton(btn)) continue;
-    const target = resolveClickTarget(playbarClickTarget(btn));
-    if (!target) continue;
-    const label = (target.getAttribute("aria-label") || "").trim();
-    log(`  click: play (${label || "transport"})`);
-    forceClick(target);
-    await sleep(500);
-    return true;
+    if (playbarPlaybackUnderway()) {
+      log("  play-bar playback started");
+      return true;
+    }
+
+    const playTargets = pickPlaybarOnlyPlayTargets();
+    if (!playTargets.length) {
+      log("  ! play-bar play control not found — not clicking the library");
+      return false;
+    }
+
+    let clicked = false;
+    for (const btn of playTargets) {
+      if (isLibraryRowTransportButton(btn)) continue;
+      const target = resolveClickTarget(playbarClickTarget(btn));
+      if (!target) continue;
+      const label = (target.getAttribute("aria-label") || "").trim();
+      attempt += 1;
+      log(`  click: play (${label || "transport"}) attempt ${attempt}`);
+      forceClick(target);
+      clicked = true;
+      await sleep(400);
+      if (playbarPlaybackUnderway()) {
+        log("  play-bar playback started");
+        return true;
+      }
+    }
+
+    if (!clicked) {
+      log("  ! play-bar play control is not clickable");
+      return false;
+    }
+
+    if (attempt >= 3 && !playbarPlaybackUnderway()) {
+      nudgePausedMediaPlay();
+      await sleep(300);
+      if (playbarPlaybackUnderway()) {
+        log("  playback started after media nudge");
+        return true;
+      }
+    }
+
+    await sleep(250);
   }
 
-  log("  ! play-bar play control is not clickable");
+  log("  ! play-bar play did not start playback — discarding");
   return false;
 }
 
