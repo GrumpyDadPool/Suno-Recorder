@@ -1,28 +1,68 @@
 # Suno Recorder
 
-Chrome extension folder for **Suno Recorder** — load this directory unpacked.
+A Chrome extension that walks your [Suno](https://suno.com) library
+track-by-track and saves each song as a **WAV** file, with lyrics and cover
+art saved alongside — through Chrome tab audio capture, on your machine.
 
-Plays through `suno.com/me` and saves each track as **WAV** via tab audio
-capture into a subfolder of Chrome’s download folder (default `Suno Recorder`).
-Lyrics and the cover image are saved beside the WAV when the page shows them.
+No download quotas, no system-wide loopback, no accounts, no servers.
+Everything stays local.
+
+## What it does
+
+Three modes, from the toolbar popup on `suno.com/me`:
+
+- **Start recording** — scrolls your library top to bottom, plays each track,
+  and saves it as WAV. Songs already on the recorded list are skipped.
+- **One song** — records whatever is on the play bar right now (or waits for
+  you to queue one). Only Stop cancels the wait.
+- **Lyrics and covers** — opens each song and saves its lyric text (`.txt`,
+  style prompt on top) and cover image (`.jpg` / `.png` / `.webp`), without
+  recording audio.
+
+Files land in `Downloads/<save folder>/<prefix><title>.wav` (default folder
+`Suno Recorder`).
 
 ## Install
 
-`chrome://extensions` → Developer mode → **Load unpacked** → **this folder**.
+1. Clone this repo.
+2. Open `chrome://extensions` and turn on **Developer mode**.
+3. **Load unpacked** → select the `suno-recorder/` folder.
 
-**Required files:** [`FILES.md`](FILES.md)
+**After every extension Reload, refresh your Suno tab** before starting —
+otherwise the content script is running a stale context.
 
-## Use
+Required vs. optional files: [`suno-recorder/FILES.md`](suno-recorder/FILES.md)
 
-1. Open `https://suno.com/me` (logged in)
-2. **Start recording** presses Home, then Page Up until nothing new appears, then Page Down, and plays through the library. **One song** starts immediately when a title is already on the bottom play bar; otherwise it waits until you put a song there, and only Stop cancels that wait. It then presses the play bar’s play button. Capture stops when the play bar changes. It does not move the library. **Lyrics and covers** uses that same Home, Page Up, then Page Down order, opens each song, and saves its lyric text and cover image, without recording audio.
-3. **After every extension Reload, refresh the Suno tab**
+## Options
 
-Options: max tracks, filename prefix, **save folder**, skip done, **recorded songs** (remove a title to record it again), folder scan, speaker monitor (default on).
+Right-click the toolbar icon → **Options**:
+
+| Option | What it does |
+|--------|--------------|
+| Max tracks per session | `0` = entire library; use `1`–`3` for a smoke test |
+| Filename prefix | Optional prefix before the sanitized title |
+| Save folder | Subfolder inside your Chrome downloads folder |
+| Skip songs on the recorded list | Don't re-record finished songs |
+| Play captured audio through speakers | Monitor while recording (default on) |
+| Scan a folder | One-time import of existing downloads into the recorded list |
+| Recorded songs | Remove a title to record that song again |
 
 ## Notes
 
-- Only this tab’s audio is recorded (not system sounds / other apps)
-- MediaRecorder captures WebM/Opus internally; converted to WAV before save
-- Files save to `Downloads/<save folder>/<prefix><title>.wav`, plus `.txt` lyrics when that song's panel shows them and a `.jpg`, `.png`, or `.webp` cover. Lyrics and covers opens each song's panel before saving.
-- Version: see `manifest.json` (currently **1.6**)
+- Only the Suno tab's audio is recorded — not system sounds or other apps.
+- The toolbar icon pulses while a capture session is active.
+- MediaRecorder captures WebM/Opus internally; audio is converted to WAV
+  before saving.
+- On each track end the play bar is paused before encode/download, so Suno's
+  auto-advance can't clip the next track's intro.
+- If a session looks stuck, the popup resets it instead of hanging forever.
+
+## Privacy
+
+The extension talks only to `suno.com` and `cdn2.suno.ai` (cover art). No
+analytics, no account, no backend — your library, lyrics, and audio never
+leave your machine.
+
+## Version
+
+See `suno-recorder/manifest.json` (currently **1.6.17**).
