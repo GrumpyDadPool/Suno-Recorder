@@ -66,3 +66,7 @@ leave your machine.
 ## Version
 
 See `suno-recorder/manifest.json` (currently **1.6.17**).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
