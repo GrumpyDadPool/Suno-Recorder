@@ -337,6 +337,20 @@ async function beginLyricsAndCovers() {
     } catch (_) {
       /* no audio session to close */
     }
+    // Lyrics and covers records no audio, so it skips startSession's
+    // tabCapture wiring — but the content script still requires this tab to
+    // be the claimed capture tab before it runs. Claim it without audio
+    // setup; the claim must land before the "collecting" state below, which
+    // is what wakes the content script.
+    try {
+      await chrome.runtime.sendMessage({
+        target: "background",
+        type: "claimCaptureTab",
+        tabId: tab.id,
+      });
+    } catch (_) {
+      /* background will report not-owner; the content script stays parked */
+    }
     await ensureContentScript(tab.id);
     await chrome.storage.local.set({
       sunoCaptureState: {
