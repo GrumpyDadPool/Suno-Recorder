@@ -150,6 +150,18 @@ async function handleMessage(message, sender) {
       return { ok: true, isCaptureTab: Boolean(tabId && tabId === activeCaptureTabId) };
     }
 
+    case "claimCaptureTab": {
+      // Lyrics and covers runs no audio capture, so it claims the tab without
+      // the tabCapture/offscreen wiring that startSession performs. The
+      // content script's capture-tab ownership gate applies to every mode.
+      const tabId = message.tabId;
+      if (!tabId) {
+        throw new Error("claimCaptureTab message had no tabId");
+      }
+      activeCaptureTabId = tabId;
+      return { ok: true };
+    }
+
     case "startSession": {
       const tabId = message.tabId;
       if (!tabId) {
