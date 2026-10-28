@@ -63,9 +63,16 @@ The extension talks only to `suno.com` and `cdn2.suno.ai` (cover art). No
 analytics, no account, no backend — your library, lyrics, and audio never
 leave your machine.
 
+One permission deserves an explanation: the extension asks for Chrome's
+`debugger` permission solely to send trusted Home / Page Up / Page Down key
+presses, which is how it scrolls your library without starting playback.
+While a key is being sent, Chrome shows a "Suno Recorder is debugging this
+browser" banner — the debugger attaches, sends the key, and detaches
+immediately. It is never used to inspect pages or network traffic.
+
 ## Version
 
-See `suno-recorder/manifest.json` (currently **1.6.17**).
+See `suno-recorder/manifest.json` (currently **1.6.18**).
 
 ## License
 
