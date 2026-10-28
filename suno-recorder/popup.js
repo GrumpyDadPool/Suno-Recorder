@@ -168,9 +168,17 @@ async function maybeClearStaleSession(state, heartbeat) {
   if (!isSessionStale(state, heartbeat, Date.now(), STALE_SESSION_MS)) {
     return;
   }
+  // Name the mode that was actually running — "Start recording" is wrong
+  // advice after a stuck Lyrics and covers or One song run.
+  const retry =
+    state.mode === "meta"
+      ? "Try Lyrics and covers again."
+      : state.mode === "one"
+        ? "Try One song again."
+        : "Try Start recording again.";
   await chrome.storage.local.set({
     sunoCaptureState: { status: "idle", resetAt: Date.now(), resetReason: "stale-session" },
-    sunoCaptureError: "Previous session looked stuck and was reset. Try Start recording again.",
+    sunoCaptureError: `Previous session looked stuck and was reset. ${retry}`,
   });
 }
 
